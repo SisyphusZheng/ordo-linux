@@ -1,0 +1,12 @@
+Global:
+  ManageImages: true
+  DracutFlags: [--no-hostonly, --no-early-microcode]
+Components:
+  Enabled: false
+EFI:
+  ImageDir: /efi/EFI/BOOT
+  Versions: false
+  Enabled: true
+Kernel:
+  Prefix: BOOTAA64
+  CommandLine: quiet zbm.timeout=4 console=ttyAMA0,115200 console=tty0

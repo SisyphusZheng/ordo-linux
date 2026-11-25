@@ -1,0 +1,5 @@
+# Ordo 数据集布局 — 唯一事实来源（sysup / ordo / doctor / install.sh 共读）
+# 写成 ${VAR:-默认} 形式：环境变量可临时覆盖，文件里的值是常态
+POOL="${POOL:-rpool}"
+DATASET="${DATASET:-$POOL/root/ordo}"        # 根 = 可回滚的 boot environment
+HOME_DATASET="${HOME_DATASET:-$POOL/home}"   # 用户数据，回滚系统时不动它

@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# shellcheck shell=sh
+# shellcheck disable=SC2034
+
+description="Initialize the Ordo VM identity and local account"
+
+depend() {
+    need localmount
+    before dbus NetworkManager greetd
+}
+
+start() {
+    ebegin "Preparing the Ordo VM"
+    /usr/local/sbin/ordo-vm-firstboot
+    eend $?
+}

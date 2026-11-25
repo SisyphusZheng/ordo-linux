@@ -1,0 +1,137 @@
+#!/usr/bin/bash
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+rescue() {
+    echo
+    echo "[ordo-live] FAILED: $*"
+    echo "[ordo-live] 救援 shell（可输入命令）"
+    exec /usr/bin/bash -i
+}
+mount -t proc proc /proc 2>/dev/null
+mount -t sysfs sysfs /sys 2>/dev/null
+mount -t devtmpfs dev /dev 2>/dev/null
+
+for m in apple-dart apple-sart pcie-apple dwc3-apple phy-apple-atc tps6598x \
+         pinctrl-apple-gpio spi-apple spi-hid-apple spi-hid-apple-of macsmc \
+         overlay nvme nvme-core nvme-apple apple_wdt zfs spl; do
+    modprobe -q "$m" 2>/dev/null || true
+done
+# 看门狗：直接 magic close 关掉（nowayout=n 时可关闭），避免 switch_root 后喂狗断链导致复位循环
+# 限制 ZFS ARC 到 1GB（纯缓存上限，不影响 ZFS 正确性；顺序：先 min 后 max）
+if [ -d /sys/module/zfs ]; then
+    echo 268435456 > /sys/module/zfs/parameters/zfs_arc_min 2>/dev/null || true
+    echo 1073741824 > /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || true
+    CM=$(awk '/^c_max/ {print $3}' /proc/spl/kstat/zfs/arcstats 2>/dev/null)
+    if [ -n "$CM" ]; then
+        echo "[ordo-live] ZFS ARC c_max=$((CM/1048576)) MiB"
+    else
+        echo "[ordo-live] ZFS ARC 设置后无法读取 arcstats（继续）"
+    fi
+fi
+if [ -e /dev/watchdog ]; then
+    exec 3>/dev/watchdog
+    echo V >&3 2>/dev/null
+    exec 3>&-
+    echo "[ordo-live] 看门狗已关闭"
+fi
+
+# 关键修复：所有挂载点先建好
+mkdir -p /run/payload /run/sq /run/rootfsbase /run/overlay /sysroot
+
+payload_boot_id='@PAYLOAD_BOOT_ID@'
+if [ -n "$payload_boot_id" ]; then
+    echo "[ordo-live] USB payload PARTUUID: $payload_boot_id"
+    for m in xhci-hcd xhci-plat-hcd usb-storage scsi_mod sd_mod; do
+        modprobe -q "$m" 2>/dev/null || true
+    done
+    for ((attempt=0; attempt<90; attempt++)); do
+        DEV=$(blkid -c /dev/null -t "PARTUUID=$payload_boot_id" -o device)
+        if [ -b "$DEV" ] && [ "$(blkid -p -s LABEL -o value "$DEV")" = ORDOPAYLOAD ]; then
+            mount -t vfat -o ro "$DEV" /run/payload || rescue "cannot mount selected USB payload"
+            break
+        fi
+        sleep 1
+    done
+    mountpoint_found=$(findmnt -nr -M /run/payload -o TARGET)
+    [ "$mountpoint_found" = /run/payload ] || rescue "selected USB payload was not found"
+else
+echo "[ordo-live] 内部载荷模式"
+i=0
+while [ ! -b /dev/nvme0n1 ] && [ "$i" -lt 120 ]; do i=$((i+1)); sleep 0.5; done
+
+# 1) 内部 ORDOINNER 分区
+DEV=""
+j=0
+while [ "$j" -lt 60 ]; do
+    for d in /dev/nvme?n?p[0-9]*; do
+        [ -b "$d" ] || continue
+        if [ "$(blkid -o value -s LABEL "$d" 2>/dev/null)" = "ORDOINNER" ]; then DEV="$d"; break; fi
+    done
+    [ -n "$DEV" ] && break
+    j=$((j+1)); sleep 0.5
+done
+if [ -n "$DEV" ]; then
+    mount -t vfat -o ro "$DEV" /run/payload 2>/dev/null \
+        && echo "[ordo-live] 内部载荷已挂载：$DEV" \
+        || echo "[ordo-live] 内部载荷挂载失败"
+fi
+# 2) 回退 USB
+if [ ! -f /run/payload/image.squashfs ]; then
+    echo "[ordo-live] 回退扫描 USB..."
+    k=0
+    while [ "$k" -lt 80 ]; do
+        for d in /dev/sd?[0-9] /dev/sd??[0-9] /dev/sd[a-z]; do
+            [ -b "$d" ] || continue
+            if [ "$(blkid -o value -s LABEL "$d" 2>/dev/null)" = "ORDOPAYLOAD" ]; then DEV="$d"; break; fi
+        done
+        [ -n "$DEV" ] && break
+        k=$((k+1)); sleep 0.5
+    done
+    if [ -n "$DEV" ]; then
+        mount -t vfat -o ro "$DEV" /run/payload 2>/dev/null \
+            && echo "[ordo-live] USB 载荷：$DEV"
+    fi
+fi
+fi
+[ -f /run/payload/image.squashfs ] || rescue "找不到载荷（内部与 USB 都失败）"
+
+# squashfs 拷入内存（安装会覆盖内部载荷区）
+mount -t tmpfs -o size=2G tmpfs /run/sq || rescue "tmpfs /run/sq 失败"
+echo "[ordo-live] 复制 Live 文件系统到内存..."
+cat /run/payload/image.squashfs > /run/sq/image.squashfs || rescue "拷贝 squashfs 失败"
+if [ -n "$payload_boot_id" ]; then
+    printf '%s  %s\n' '@SQUASHFS_SHA@' /run/sq/image.squashfs | sha256sum -c - ||
+        rescue "Live squashfs checksum failed"
+fi
+L2=$(losetup -r -f --show /run/sq/image.squashfs) || rescue "losetup squashfs 失败"
+mount -t squashfs -o ro "$L2" /run/rootfsbase || rescue "squashfs 挂载失败"
+echo "[ordo-live] squashfs OK（$L2）"
+
+mount -t tmpfs -o size=13G tmpfs /run/overlay || rescue "tmpfs overlay 失败"
+mkdir -p /run/overlay/upper /run/overlay/work
+mount -t overlay overlay -o lowerdir=/run/rootfsbase,upperdir=/run/overlay/upper,workdir=/run/overlay/work /sysroot || rescue "overlay 挂载失败"
+[ -x /sysroot/sbin/init ] || [ -x /sysroot/usr/sbin/init ] || rescue "live 根里没有 init"
+echo "[ordo-live] overlay OK"
+
+# tty1 自动登录（键盘若可用）
+if [ -f /sysroot/etc/inittab ]; then
+    agetty='/sbin/agetty --autologin root --noclear 38400 tty1 linux'
+    if [ -x /ordo-auto-install ]; then
+        agetty='/sbin/agetty --autologin root --login-program /ordo-auto-install --noclear 38400 tty1 linux'
+    fi
+    sed -i "s|^c1:.*|c1:12345:respawn:$agetty|" /sysroot/etc/inittab || rescue "tty1 setup failed"
+fi
+# （已移除）live 侧喂狗服务：它会重新武装看门狗，必须不要
+
+# Manual hardware preflight.
+rm -f /sysroot/etc/local.d/50-ordo-autoinstall.start
+echo '[ordo-live] MANUAL PREFLIGHT: autoinstall disabled'
+
+mkdir -p /sysroot/mnt/payload
+# 必须用 --move：--bind 会在旧根留下隐藏的克隆挂载，导致后面 sfdisk 认为分区仍被占用
+mount --move /run/payload /sysroot/mnt/payload || rescue "迁移 payload 挂载失败"
+mount --move /dev /sysroot/dev || rescue "move /dev 失败"
+mount --move /proc /sysroot/proc 2>/dev/null || true
+mount --move /sys /sysroot/sys 2>/dev/null || true
+export CDBOOT=1
+echo '[ordo-live] switch_root to manual live shell'
+exec switch_root /sysroot /sbin/init

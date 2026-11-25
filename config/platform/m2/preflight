@@ -1,0 +1,17 @@
+#!/bin/sh
+save_log() {
+    logger=/etc/local.d/80-ordo-usb.stop
+    if [ -x "$logger" ]; then
+        "$logger" "$1" || echo "ORDO: could not save $1 diagnostic on ORDOINNER" >/dev/console
+    fi
+}
+save_log start
+echo "ORDO: checking the external USB installer (allow 45s for detection)..." >/dev/console
+if /usr/bin/ordo-install --check >/tmp/ordo-preflight.log 2>&1; then
+    echo "ORDO CHECK PASSED. At the livecd prompt, type: ordo-install" >/dev/console
+else
+    tail -40 /tmp/ordo-preflight.log >/dev/console
+    echo "ORDO CHECK FAILED. Full details: cat /tmp/ordo-preflight.log" >/dev/console
+fi
+save_log result
+exit 0

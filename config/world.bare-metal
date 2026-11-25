@@ -1,0 +1,17 @@
+# 真机专用包（ORDO_PLATFORM=bare-metal 时追加到 world）
+#
+# 【为什么单独一个文件】旧版把这些包混在 config/package.use/real-hardware
+# 里（那是 USE 文件，放包名会被 Portage 当成 USE 值）。装什么包属于声明层。
+#
+# 真机安装和 OneConfig 应用时并入 @ordo-core。
+# VM 安装不读本文件。
+
+net-wireless/wpa_supplicant
+net-wireless/iw
+net-wireless/wireless-regdb
+net-wireless/bluez
+sys-firmware/linux-firmware
+sys-firmware/intel-microcode
+sys-power/power-profiles-daemon
+media-libs/alsa-ucm-conf
+sys-apps/i2c-tools

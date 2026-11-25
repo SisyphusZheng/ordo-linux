@@ -1,0 +1,151 @@
+# config/world 的理由与注解（不参与 Portage，不被 install.sh 拷贝）
+#
+# 为什么单独一个文件：config/world 必须是裸 atom 列表（它会原样 cp 进
+# /var/lib/portage/world），而「为什么选这个包」的理由必须留在仓里。
+# 所以理由放这里 —— 与数据分离，但不丢失。
+#
+# 本文件是 config/world 的逐段镜像：world 里的每个 atom 在这里都有
+# 对应的注解。两文件必须同 commit 改（ADR 0011 桌面栈，2026-11-22 重写）。
+
+# ordo — 系统层包集合（@world）
+# 规则：只放系统层。应用（浏览器/办公/IM/编辑器）一律走 Flatpak。
+
+# ---- 基座 ----
+sys-apps/baselayout
+sys-apps/openrc
+sys-apps/util-linux
+sys-apps/coreutils
+sys-apps/kmod
+app-admin/doas
+sys-apps/flatpak    # 应用分发（Flatpak-first 宪法）
+net-misc/rsync
+
+# ---- 构建工具 ----
+# ccache：编译中断不再从零开始（clang-22 一次 45min+）
+dev-util/ccache
+llvm-core/clang    # 本地 overlay ebuild 的 bindgen 需要 libclang.so；
+                   # USE 裁剪见 config/package.use/llvm
+
+# ---- 内核与 ZFS ----
+# zfs 2.4.4 单包（自带内核模块，modules USE）；不再需要 sys-fs/zfs-kmod
+sys-kernel/gentoo-kernel-bin
+sys-fs/zfs
+sys-kernel/dracut    # BE initramfs（自含 zfs 模块与用户态，见 docs/decisions/0002）
+sys-apps/systemd-utils    # [boot] 提供 UEFI stub（无 systemd 时 ZBM 需要）
+
+# ---- 引导（ZBM 唯一；grub 已移除，双引导器违反宪法）----
+sys-boot/zfsbootmenu    # 来自 GURU overlay，见 docs/decisions/0002
+
+# ---- 网络与时间 ----
+net-misc/networkmanager
+net-misc/dhcpcd
+net-misc/openssh
+# 选型 chrony 而非 openntpd：后者只能 slew，VM 大漂移跟不上（ADR 0003）
+net-misc/chrony
+
+# ---- 无线（蓝牙/WiFi）----
+# VM 无硬件，但装上无害；真机直接可用
+net-wireless/bluez    # 蓝牙栈（rc-service bluetooth）
+net-wireless/wpa_supplicant    # WiFi 认证（-gui 见 package.use/desktop，偏离 #58）
+net-wireless/wireless-regdb    # 各国频段/功率规范
+net-wireless/iw    # WiFi 诊断（iw dev / iw scan）
+# rfkill 不是独立包 —— 它是 sys-apps/util-linux 的 USE flag（package.use/desktop）。
+
+# ---- 桌面外壳（Noctalia 全家桶，ADR 0011）----
+# 登录：greetd（守护进程）+ Noctalia Greeter（图形前端），零 GTK/Qt 依赖
+gui-libs/greetd
+sys-apps/xdg-desktop-portal
+sys-apps/xdg-desktop-portal-umbriel    # 截图/录屏/文件选择门户（umbriel[screencast] 拉起）
+# portal-gtk 保留：Flatpak 应用通过它读 Settings portal（深浅色）
+sys-apps/xdg-desktop-portal-gtk
+
+# ---- 音频 ----
+# 为什么在 world 而不是 Flatpak：音频栈是系统服务（D-Bus 激活、PulseAudio 协议），
+# 沙箱应用经 socket 连接，无法自备（deviations #54）
+media-video/pipewire
+media-video/wireplumber    # 会话/设备策略；缺它没声音，Noctalia 每 5 秒重试连接
+
+# ---- 桌面功能组件 ----
+media-sound/playerctl    # 媒体键落地（XF86AudioPlay/Next/Prev；noctalia msg media 不可用，偏离 #61）。
+                         # brightnessctl 已移除（偏离 #65 同轮清理）：亮度走 noctalia msg brightness-*，VM 无背光消费者；真机需要时按此格式重加
+gui-apps/wl-clipboard    # 剪贴板（截图键位 wl-copy）
+gui-apps/grim    # 截图（键位直接调用）
+gui-apps/slurp    # 区域选择
+gui-apps/noctalia    # 外壳：顶栏/启动器/控制中心/通知/锁屏/壁纸/剪贴板/OSD/托盘
+gui-wm/umbriel    # 合成器：wlroots + 四种布局（pre-release，偏离 #58）
+gui-apps/luciole    # 文件管理器 + 门户文件选择器（无 tag，ebuild 用 archive/main，偏离 #59）
+gui-apps/noctalia-greeter    # 图形登录（用 greetd 用户，偏离 #60）
+
+# ---- 终端 ----
+x11-terms/wezterm    # 主终端（GPU 加速，Wayland 原生）
+
+# ---- 中文开箱 ----
+media-fonts/noto-cjk
+# fcitx5（包名 app-i18n/fcitx）+ rime 引擎：fcitx5 自带 libwaylandim.so，
+# 经 text-input-v3 向合成器提供输入法，不需要 GTK/Qt immodule（偏离 #57）。
+# 由 umbriel 的 [general] autostart 拉起（2026-11-22 起，此前靠手工）。
+app-i18n/fcitx
+app-i18n/fcitx-rime
+sys-libs/timezone-data
+
+# ---- GTK 主题与图标（config/skel/.config/gtk-*/settings.ini 引用）----
+# 缺这两个包时，GTK 应用会显示默认灰主题 —— 配置写了但没东西可加载。
+x11-themes/arc-theme
+x11-themes/papirus-icon-theme
+
+# ---- 字体 ----
+media-fonts/nerdfonts    # 全量 NF + JetBrainsMono 补丁（USE 见 package.use/fonts）
+media-fonts/symbols-nerd-font    # 纯图标字体（fallback，偏离 #55 的回退方案）
+media-fonts/jetbrains-mono    # 非 Nerd 版本
+
+# ---- 用户 shell（config/skel 的 .zshrc 依赖）----
+app-shells/zsh
+app-shells/starship
+app-shells/zsh-autosuggestions
+app-shells/zsh-syntax-highlighting
+app-shells/gentoo-zsh-completions
+
+# ---- CLI 工具 ----
+app-shells/zoxide
+sys-apps/bat
+sys-apps/eza
+sys-apps/fd
+sys-apps/ripgrep
+sys-process/btop
+app-misc/fastfetch    # 系统信息展示（Ordo 品牌）
+app-misc/tmux    # 终端复用：状态栏 + 窗格编排 + 会话持久
+
+# ---- 系统服务 ----
+sys-process/cronie    # 定时快照（/etc/cron.d/ordo-snapshot）
+
+# ---- 引导/文件系统工具 ----
+sys-boot/efibootmgr
+sys-fs/dosfstools
+
+# ---- 开发基础 ----
+dev-vcs/git
+dev-lang/python
+
+# ==============================================================================
+# 已移除（先查消费者再动手；2026-11-22 对账）
+# ==============================================================================
+# app-editors/neovim        编辑器走 Flatpak（AGENTS.md；forbidden-world 现有
+#                           app-editors/* 整类判据，doctor 第 8 项守门）
+# app-misc/jq               仓内零消费者（scripts/ 与 config/ 全 grep 过）→ deselect
+# sys-apps/plocate          零消费者（cron.daily/plocate-updatedb 是包自带的）→ deselect
+# app-portage/pycargoebuild # 曾为 ashell overlay ebuild 生成 crate 清单（偏离 #60 旧文）；
+#                           ashell 已退场 → deselect；登记 config/oneshot-packages
+#                           （未来写 crate ebuild 时再手动 emerge）
+# media-video/ffmpeg        world 里无独立理由；保留它的是依赖树（ffmpegthumbnailer/
+#                           localsearch/sox）→ deselect，不进 config/world；
+#                           USE 裁剪（-sdl，避免 GTK3）留在 package.use/desktop
+# media-gfx/chafa           曾为 yazi 预览服务；yazi 已退场（ADR 0011），Luciole/
+#                           Noctalia 均不依赖 → 从声明删除
+# media-video/ffmpegthumbnailer  曾为 yazi 缩略图服务；Luciole ebuild 无此依赖
+#                           （RDEPEND 全查过）→ 从声明删除
+# media-sound/pavucontrol   与 Noctalia 控制中心的音量面板功能重复，且是 GTK3 GUI
+#                           （core 纯度冲突）→ 从声明删除；音量走 Noctalia OSD
+#
+# gui-libs/display-manager-init  不进 world：它只服务于安装期的 OpenRC 服务定义，
+#                           由 install.sh §14a 显式 emerge。
+# ==============================================================================

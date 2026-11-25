@@ -1,0 +1,179 @@
+# Ordo 桌面 —— Umbriel 合成器配置
+#
+# 从 niri 迁移而来。对应关系：
+#   niri config.kdl  →  umbriel config.toml
+#   gaps 15          →  [layout.scrolling] 的 gaps
+#   focus-ring 2px   →  [appearance] 的 border_width
+#   只有滚动布局     →  [layout] mode 可选四种
+#
+# 保存即生效（live-reloaded TOML）。校验：umbriel config validate
+
+# Noctalia 的官方 umbriel 模板生成 noctalia.toml（窗口边框/强调色），
+# 这里包含它 —— 换壁纸即换边框颜色。
+[include]
+files = []
+
+# 可选：Noctalia 的模板产物。装上 Noctalia 时由它渲染，
+# 没装时缺失也不影响启动（所以用 optional 而不是 files）。
+[include.optional]
+files = ["noctalia.toml"]
+
+[general]
+# 启动时拉起：Noctalia 外壳 + 输入法（fcitx5 走 text-input-v3，无需 immodule）。
+# 缺 fcitx5：中文输入只在手动拉起后可用，新登录会话直接没有输入法
+# （2026-11-22 实机事故：autostart 只写了 noctalia，fcitx5 靠手工起）。
+autostart = ["noctalia", "fcitx5", "sh -c 'test ! -x /usr/local/bin/ordo-m2-hardware || exec /usr/local/bin/ordo-m2-hardware --session-report'"]
+# 保留 XWayland
+xwayland = true
+# 模态对话框挂在父窗口上
+attach_modal_dialogs = true
+
+# ==============================================================================
+# 输出：2K
+#
+# Virtual-1 通告的模式里没有 2560x1440，但 Umbriel 会把未经通告的分辨率
+# 当自定义模式尝试。失败则回退到 preferred 并记 warn（上游 outputs.md）。
+# ==============================================================================
+[output.Virtual-1]
+mode = "2560x1440@60"
+scale = 1.0
+
+[appearance]
+border_width = 2
+outer_border_width = 0
+corner_radius = 22
+drag_opacity = 0.75
+opaque_fullscreen = true
+# Luciole 的 use_ssd = true 依赖这里：合成器声明不做 CSD，
+# Luciole 才用服务端装饰画标题栏，拿到统一的圆角与边框色。
+# （umbriel config validate 实测此键在 [appearance] 下合法；写成
+#   window_rule 键则报 unknown key。）
+prefer_no_csd = true
+
+[appearance.blur]
+radius = 5
+
+# ==============================================================================
+# 布局
+# ==============================================================================
+[layout]
+# 默认滚动布局（与 niri 一致）。
+# 另三种可用 Mod+Ctrl+L 循环切换：scrolling / dwindle / master / stacking
+mode = "scrolling"
+# 列宽预设，对应 niri 的 preset-column-widths
+extent_presets = [0.333, 0.5, 0.667]
+
+[input.keyboard]
+layout = "us"
+
+# ==============================================================================
+# 键位
+#
+# 与 niri 同一套语义：方向键导航、A/D 列宽、S 搜索、F 全屏、Q 关窗
+# ==============================================================================
+[keybinds]
+
+# ---- 应用 ----
+"Mod+Return" = { action = "spawn wezterm", repeat = false }
+# 搜索：niri 的 Mod+S，这里调 Noctalia 启动器
+"Mod+S" = { action = "spawn noctalia msg panel-toggle launcher", repeat = false }
+"Mod+E" = { action = "spawn luciole", repeat = false }
+# 剪贴板面板：动词是 panel-toggle clipboard（noctalia msg 实测返回 ok，
+# 面板正常渲染；历史条目在 [shell] clipboard_enabled = true 下收集）
+"Mod+V" = { action = "spawn noctalia msg panel-toggle clipboard", repeat = false }
+# 锁屏：Umbriel 本身没有 lock 动作，交给 Noctalia。
+# 命令是 `noctalia msg session lock`（不是 lockscreen-show，后者不存在）。
+"Mod+L" = { action = "spawn noctalia msg session lock", repeat = false }
+"Mod+Escape" = "session-quit"
+"Mod+Q" = { action = "window-close", repeat = false }
+
+# ---- 导航 ----
+"Mod+Left" = "window-focus-left"
+"Mod+Right" = "window-focus-right"
+"Mod+Up" = "window-focus-up"
+"Mod+Down" = "window-focus-down"
+"Mod+H" = "window-focus-left"
+# 注：Mod+L 已用于锁屏，聚焦右侧只用方向键
+"Mod+K" = "window-focus-up"
+"Mod+J" = "window-focus-down"
+
+# ---- 尺寸 ----
+# niri 的 set-column-width ±10%
+"Mod+A" = "window-modify-primary-extent -0.02"
+"Mod+D" = "window-modify-primary-extent +0.02"
+"Mod+R" = "window-cycle-primary-extent"
+# niri 的 expand-column-to-available-width
+"Mod+W" = { action = "window-toggle-maximize-to-edges", repeat = false }
+
+# ---- 窗口 ----
+"Mod+F" = { action = "window-toggle-fullscreen", repeat = false }
+"Mod+Shift+F" = { action = "window-toggle-floating", repeat = false }
+"Mod+O" = { action = "overview-toggle", repeat = false }
+"Mod+Shift+Left" = "column-move-left"
+"Mod+Shift+Right" = "column-move-right"
+"Mod+Shift+Up" = "window-move-up"
+"Mod+Shift+Down" = "window-move-down"
+
+# ---- 布局切换：niri 没有的能力 ----
+"Mod+Ctrl+L" = "workspace-set-layout toggle scrolling dwindle master stacking"
+
+# ---- 工作区 ----
+"Mod+1" = "workspace-switch 1"
+"Mod+2" = "workspace-switch 2"
+"Mod+3" = "workspace-switch 3"
+"Mod+4" = "workspace-switch 4"
+"Mod+5" = "workspace-switch 5"
+"Mod+Shift+1" = "window-move-to-workspace 1"
+"Mod+Shift+2" = "window-move-to-workspace 2"
+"Mod+Shift+3" = "window-move-to-workspace 3"
+"Mod+Shift+4" = "window-move-to-workspace 4"
+"Mod+Shift+5" = "window-move-to-workspace 5"
+
+# ---- 截图 ----
+"Print" = "spawn sh -c 'grim -g \"$(slurp)\" - | wl-copy'"
+"Mod+Print" = "spawn sh -c 'grim - | wl-copy'"
+
+# ---- 媒体键：走 Noctalia 的 OSD ----
+"XF86AudioRaiseVolume" = { action = "spawn noctalia msg volume-up", allow_when_locked = true }
+"XF86AudioLowerVolume" = { action = "spawn noctalia msg volume-down", allow_when_locked = true }
+"XF86AudioMute" = { action = "spawn noctalia msg volume-mute", allow_when_locked = true, repeat = false }
+# 媒体控制用 playerctl：noctalia msg media <action> 在当前版本对所有 action
+# 都返回 "unknown command"（help 里列了但不可用），实测不可靠。
+"XF86AudioPlay" = { action = "spawn playerctl play-pause", allow_when_locked = true, repeat = false }
+"XF86AudioNext" = { action = "spawn playerctl next", allow_when_locked = true }
+"XF86AudioPrev" = { action = "spawn playerctl previous", allow_when_locked = true }
+"XF86MonBrightnessUp" = { action = "spawn noctalia msg brightness-up", allow_when_locked = true }
+"XF86MonBrightnessDown" = { action = "spawn noctalia msg brightness-down", allow_when_locked = true }
+# M2 Air has no dedicated keyboard-light keys on its built-in keyboard.
+"Mod+Shift+F1" = "spawn sh -c 'test ! -x /usr/local/bin/ordo-keyboard-light || exec /usr/local/bin/ordo-keyboard-light down'"
+"Mod+Shift+F2" = "spawn sh -c 'test ! -x /usr/local/bin/ordo-keyboard-light || exec /usr/local/bin/ordo-keyboard-light up'"
+"XF86KbdBrightnessDown" = { action = "spawn sh -c 'test ! -x /usr/local/bin/ordo-keyboard-light || exec /usr/local/bin/ordo-keyboard-light down'", allow_when_locked = true }
+"XF86KbdBrightnessUp" = { action = "spawn sh -c 'test ! -x /usr/local/bin/ordo-keyboard-light || exec /usr/local/bin/ordo-keyboard-light up'", allow_when_locked = true }
+
+# ---- 输入法 ----
+"Mod+I" = "spawn sh -c 'fcitx5-remote -t'"
+
+# ==============================================================================
+# 窗口规则
+# ==============================================================================
+# Noctalia 的设置窗口浮起来，不被平铺
+[[window_rule]]
+match.app_id = "^dev\\.noctalia\\.Noctalia$"
+default_floating = true
+
+# 终端：内容区透明，靠合成器高斯模糊出毛玻璃
+[[window_rule]]
+match.app_id = "^org\\.wezfurlong\\.wezterm$"
+# 终端透明只能在这里做：wezterm 的 window_background_opacity
+# 在 Umbriel 下实测不生效（窗内像素恒为 0，与设置无关）。
+opacity = 0.88
+blur = true
+blur_popups = true
+corner_radius = 18
+
+# Luciole：同样的透明 + 更大圆角
+[[window_rule]]
+match.app_id = "^luciole$"
+opacity = 0.88
+blur = true
+corner_radius = 22

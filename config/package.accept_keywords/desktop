@@ -1,0 +1,28 @@
+# 尚未稳定 arm64 keyword 的包（逐个评审；能用稳定版就撤掉对应行）
+#
+# 【规则】只允许逐包 **，绝不允许全局 ~arm64 / **（AGENTS.md 禁令）。
+#         全局 keyword 登记在 deviations #1，收货条件见该条目。
+#
+# 注意：** 只解决「该包自身无 arm64 keyword」；其依赖若缺 ~arm64，
+#       由 install.sh 的 autounmask 收敛循环补写（依赖大多有 ~arm64 条目）。
+
+# zfsbootmenu：只在 GURU overlay，无 arm64 keyword（见 docs/decisions/0002）
+sys-boot/zfsbootmenu **
+
+# tuigreet：主树只有 ~arm64（greetd 本体同样 ~arm64）
+gui-apps/tuigreet ~arm64
+gui-libs/greetd ~arm64
+
+# wlsunset：只在 GURU，无 arm64 keyword
+gui-apps/wlsunset **
+
+# ashell：本地 overlay 的 9999 无 KEYWORDS（live ebuild 惯例）
+gui-apps/ashell **
+
+# Noctalia 全家桶：GURU 的 ebuild 只标了 ~amd64
+gui-apps/noctalia **
+gui-wm/umbriel **
+sys-apps/xdg-desktop-portal-umbriel **
+
+gui-apps/luciole **
+gui-apps/noctalia-greeter **

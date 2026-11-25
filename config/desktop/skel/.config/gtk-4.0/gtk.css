@@ -1,0 +1,25 @@
+/* Ordo GTK4 —— 近黑底 + 绿色强调 */
+@import url("resource:///org/gtk/libadwaita/master/gtk-dark.css");
+
+window, .background {
+  background-color: #0f100f;
+  color: #d8e0d8;
+}
+headerbar {
+  background-color: #0a0b0a;
+  color: #d8e0d8;
+  border-color: #3b433b;
+}
+.navigation-sidebar, .sidebar, placessidebar {
+  background-color: #0a0b0a;
+  color: #d8e0d8;
+}
+.navigation-sidebar row:selected, .sidebar row:selected {
+  background-color: #252825;
+  color: #d8e0d8;
+}
+/* 选中/强调用绿 */
+selection, *:selected {
+  background-color: #79d279;
+  color: #0f100f;
+}

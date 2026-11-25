@@ -1,0 +1,115 @@
+#!/bin/sh
+# ordo-session-env — 会话环境初始化（供各合成器的 session 脚本 source）
+#
+# 这段逻辑是血泪换来的，抽出来避免每个合成器脚本重写一遍：
+#
+# 【事故】旧版是
+#     dbus-daemon ... || true
+#     [ -S "$XDG_RUNTIME_DIR/bus" ] && export DBUS_SESSION_BUS_ADDRESS=...
+#   在图形登录管理器下 dbus-daemon 静默失败（XDG_RUNTIME_DIR 尚未就绪），
+#   `|| true` 吞掉错误、`&&` 短路跳过 export —— 结果环境里留着
+#   DBUS_SESSION_BUS_ADDRESS 指向不存在的 socket，整个会话
+#   （portal / flatpak / 通知 / 主题）静默降级但表面一切正常。
+#
+# 现在：重试 + 失败即致命（会话起不来比带病运行好排查）。
+#
+# 用法：. /usr/local/bin/ordo-session-env
+
+# libseat 后端必须显式指定 logind。
+# 不设时 libseat 会尝试连接 seatd（本系统未安装），合成器拿不到 seat：
+#   error initializing the TTY backend
+#   Failed to open session: Function not implemented (os error 38)
+export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-logind}"
+
+# Apple 的显示控制器和 AGX GPU 是两个 DRM 设备。用 AGX 做渲染，
+# 由 wlroots 自动选择拥有输出的 KMS 设备。
+if [ -z "${WLR_RENDERER:-}" ]; then
+    ordo_asahi_render_node() {
+        for _render in /sys/class/drm/renderD*; do
+            case "$(readlink "$_render/device/driver" 2>/dev/null || :)" in
+                */asahi)
+                    _node=/dev/dri/${_render##*/}
+                    [ -r "$_node" ] && [ -w "$_node" ] || continue
+                    printf '%s\n' "$_node"
+                    return 0
+                    ;;
+            esac
+        done
+        return 1
+    }
+    for _mesa in /usr/lib*/dri/asahi_dri.so; do
+        [ -r "$_mesa" ] || continue
+        _node=$(ordo_asahi_render_node) || :
+        # OpenRC 冷插期间，greetd 首次登录可能先于 AGX 的 udev 节点。
+        if [ -z "$_node" ] && [ "$(cat /etc/ordo/platform 2>/dev/null || :)" = m2-native ] &&
+           [ -r /proc/device-tree/compatible ] &&
+           tr '\000' '\n' < /proc/device-tree/compatible | grep -Fxq apple,j413 &&
+           modinfo asahi >/dev/null 2>&1; then
+            _tries=0
+            while [ -z "$_node" ] && [ "$_tries" -lt 40 ]; do
+                sleep 0.1
+                _node=$(ordo_asahi_render_node) || :
+                _tries=$((_tries + 1))
+            done
+            if [ -z "$_node" ]; then
+                export ORDO_ASAHI_RENDER_NODE_TIMEOUT=1
+                printf '%s\n' 'ordo-session-env: 等待可读写的 Asahi 渲染节点超时，允许软件渲染' >&2
+            fi
+            unset _tries
+        fi
+        if [ -n "$_node" ]; then
+            export WLR_RENDER_DRM_DEVICE="${WLR_RENDER_DRM_DEVICE:-$_node}"
+            WLR_RENDERER=gles2
+        fi
+        break
+    done
+    unset _mesa _node
+    unset -f ordo_asahi_render_node
+fi
+# Umbriel 的特效渲染器在 pixman 路径也需要 EGL。
+export WLR_RENDERER="${WLR_RENDERER:-pixman}"
+if [ "$WLR_RENDERER" = pixman ]; then
+    export WLR_RENDERER_ALLOW_SOFTWARE="${WLR_RENDERER_ALLOW_SOFTWARE:-1}"
+fi
+
+# 输入法：GTK_IM_MODULE 必须是 wayland（走 text-input-v3）。
+# 设成 fcitx 会让 GTK 走 immodule 绕路而失败。
+export QT_IM_MODULE=fcitx
+export GTK_IM_MODULE=wayland
+export XMODIFIERS=@im=fcitx
+export XDG_SESSION_TYPE=wayland
+
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] || [ ! -S "${XDG_RUNTIME_DIR}/bus" ]; then
+    _i=0
+    while [ ! -d "${XDG_RUNTIME_DIR}" ] && [ $_i -lt 50 ]; do
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    if [ ! -d "${XDG_RUNTIME_DIR}" ]; then
+        echo "ordo-session-env: XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR} 不存在" >&2
+        exit 1
+    fi
+
+    _i=0
+    while [ ! -S "${XDG_RUNTIME_DIR}/bus" ] && [ $_i -lt 30 ]; do
+        dbus-daemon --session --address="unix:path=${XDG_RUNTIME_DIR}/bus" \
+            --fork --print-address >/dev/null 2>&1 || true
+        [ -S "${XDG_RUNTIME_DIR}/bus" ] && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+
+    if [ ! -S "${XDG_RUNTIME_DIR}/bus" ]; then
+        echo "ordo-session-env: 会话总线启动失败（$XDG_RUNTIME_DIR/bus）" >&2
+        exit 1
+    fi
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+fi
+
+# 把会话环境写进 D-Bus activation environment，
+# 否则被自动拉起的服务拿不到 WAYLAND_DISPLAY / XDG_RUNTIME_DIR。
+if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-update-activation-environment >/dev/null 2>&1; then
+    dbus-update-activation-environment --systemd \
+        WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_CURRENT_DESKTOP \
+        QT_IM_MODULE GTK_IM_MODULE XMODIFIERS DISPLAY 2>/dev/null || true
+fi

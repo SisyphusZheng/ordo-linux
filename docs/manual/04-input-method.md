@@ -1,0 +1,82 @@
+# 04 · 中文输入
+
+Ordo 用 **fcitx5 + rime**，且只有这一条路径（ibus 已移除）。
+
+## 应该是什么体验
+
+1. 登录后直接按 `Mod+Space` 打开启动器，输入 `zhongwen`
+2. 应该出现拼音候选框，能选字
+
+候选框不出现，先做这两件事：
+
+```sh
+# 1. 进程在不在
+pgrep -x fcitx5 || echo "fcitx5 没跑"
+
+# 2. 环境变量对不对
+env | grep -E 'GTK_IM_MODULE|QT_IM_MODULE|XMODIFIERS'
+```
+
+期望输出：
+
+```
+GTK_IM_MODULE=wayland
+QT_IM_MODULE=fcitx
+XMODIFIERS=@im=fcitx
+```
+
+## 为什么 `GTK_IM_MODULE` 是 `wayland` 而不是 `fcitx`
+
+Umbriel 实现了 `text-input-v3` 协议。GTK 应用设 `GTK_IM_MODULE=wayland` 时，
+会**直接**通过这个协议和合成器通信，fcitx5 作为合成器的输入法前端工作。
+这是 Wayland 下中文可用的关键 —— 走 `fcitx` 的 immodule 路径时，GTK 会绕过
+合成器自己找输入法，而在纯 Wayland 会话里找不到。
+
+**例外**：X11 应用（经 `xwayland-satellite` 运行）拿不到 v3 协议，
+它们靠 `XMODIFIERS=@im=fcitx`。所以两个变量都要设。
+
+## 环境变量在哪定义
+
+| 文件 | 作用 |
+|---|---|
+| `config/world` | 装 `app-i18n/fcitx` / `fcitx-rime`（不需要 gtk/qt immodule） |
+| `config/desktop/99imm` | 安装时部署到 `/etc/env.d/99imm`，经 `env-update` 进入登录环境 |
+| `config/desktop/umbriel/config.toml` | `[general] autostart` 含 `fcitx5` |
+| `/etc/xdg/fcitx5/profile` | 默认输入法 = rime，唯一引擎 |
+
+检查环境变量有没有真的编译进登录环境：
+
+```sh
+grep GTK_IM_MODULE /etc/profile.env
+```
+
+如果是空的 → `env-update` 没跑（`install.sh` 会跑；手动装的话要自己跑）。
+
+## 候选框不出来
+
+按顺序排查：
+
+```sh
+# 1. rime 引擎装了吗
+fcitx5-remote -m      # 应该打印当前输入法名
+ls /usr/share/rime-data/ 2>/dev/null | head
+
+# 2. 是不是只有 GTK 应用不行（X11 应用另说）
+wezterm               # 在终端里试
+nautilus              # 在 GTK 应用里试
+
+# 3. rime 的 schema 有没有部署
+fcitx5 -d --replace --verbose 2>&1 | head -30
+```
+
+常见原因：
+- 缺 `app-i18n/fcitx-gtk`（GTK 应用完全无法输入）
+- `env.d/99imm` 写了但没 `env-update`（变量只在当前 shell 有效）
+- rime 首次启动要"部署"几秒，这时候按键没反应是正常的
+
+## 为什么不用 ibus / chinese-addons
+
+- **ibus**：GNOME 原生，但它的配置方式是 dconf；本桌面栈没有进程读它。
+  留着就是两套事实来源，改哪套生效说不清（`deviations` 已登记收回）。
+- **fcitx5-chinese-addons**：没有 arm64 keyword（`deviations #6`）。
+  rime 在 arm64 上能编，功能也更强。

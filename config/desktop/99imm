@@ -1,0 +1,5 @@
+# GTK 通过 Wayland text-input-v3 连接 fcitx5。Xwayland 应用使用 XMODIFIERS。
+GTK_IM_MODULE=wayland
+QT_IM_MODULE=fcitx
+XMODIFIERS="@im=fcitx"
+SDL_IM_MODULE=fcitx

@@ -1,0 +1,27 @@
+# 编辑器/插件产物
+.v2c/
+*.swp
+.DS_Store
+
+# 本地开发产物（VM 磁盘、ISO、下载缓存）
+dev/build/
+*.qcow2
+*.iso
+
+# 会话产物
+.zcode/
+
+# 本地目标/验收清单（不入库）
+.local/
+
+# 第三方 AI 工具产物（非本仓内容）
+.workbuddy/
+
+/dev/m2/__pycache__/
+
+# Python bytecode from local build tools
+__pycache__/
+
+# Generated legacy driver inputs
+/dev/m2/display/modules.tar.gz
+/dev/m2/power/macsmc-power.ko

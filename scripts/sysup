@@ -1,0 +1,257 @@
+#!/bin/sh
+# sysup — 升级 = 快照 → emerge → 迁移 → 可用性校验 → 失败中止并给出回滚路径
+#
+# 用法: sysup [--no-snapshot] [--dry-run] [--no-migrate] [--yes]
+#
+# 委托层守则：本脚本只做编排；快照/回滚/编译/迁移全部委托给
+# zfs、emerge、ordo-migrate。
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+ordo_require_tools awk sed grep cat date printf
+
+SNAPSHOT=1
+DRY_RUN=0
+RUN_MIGRATE=1
+ASSUME_YES=0
+
+# ---- 参数解析（旧版不解析，任何未知 flag 都被静默忽略并照常升级）----
+for _arg in "$@"; do
+    case "$_arg" in
+        --no-snapshot) SNAPSHOT=0 ;;
+        --dry-run)     DRY_RUN=1 ;;
+        --no-migrate)  RUN_MIGRATE=0 ;;
+        --yes|-y)      ASSUME_YES=1 ;;
+        -h|--help)
+            cat <<EOF
+用法: sysup [选项]
+
+  --no-snapshot   跳过升级前快照（不推荐：没有回滚点）
+  --dry-run       只显示将要做什么，不做任何变更
+  --no-migrate    升级后不运行 ordo migrate
+  --yes, -y       不询问（供自动化使用）
+
+升级流程：快照(hold) → emerge --sync → emerge -uDN @world → 迁移 →
+          可用性校验（内核/ZFS 模块/ZBM）→ 同步 M2 外置 EFI → 释放 hold
+失败：    中止并打印 ZFSBootMenu 回滚路径；快照保留为回滚点
+EOF
+            exit "$ORDO_EXIT_OK"
+            ;;
+        *) ordo_bad "未知参数：${_arg}（试 sysup --help）"; exit "$ORDO_EXIT_BAD" ;;
+    esac
+done
+
+TAG="pre-update-$(date +%Y%m%d-%H%M%S)"
+# 【关键】快照必须打在**当前运行的数据集**上。回滚后系统跑在 clone 上，
+# 此时 $DATASET 指向的是没在使用的旧系统 —— 对它打快照等于保护幽灵。
+SNAP="$RUNNING_ROOT@$TAG"
+HOLD_TAG="ordo-update-in-progress"
+
+require_root "$(basename "$0") $*"
+warn_if_identity_drift
+
+# 保留升级被中断时的快照 hold。仅在验收通过后主动释放。
+_held=0
+_release_hold() {
+    [ "$_held" -eq 1 ] || return 0
+    zfs release "$HOLD_TAG" "$SNAP" || return 1
+    _held=0
+}
+trap 'exit "$ORDO_EXIT_BAD"' INT TERM HUP
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    ordo_say "dry-run：将执行以下步骤，不做任何变更"
+    [ "$SNAPSHOT" -eq 1 ] && printf '  1. zfs snapshot %s\n' "$SNAP" || printf '  1. （跳过快照）\n'
+    printf '  2. emerge --sync\n'
+    printf '  3. emerge -uDN --keep-going @world\n'
+    [ "$RUN_MIGRATE" -eq 1 ] && printf '  4. ordo migrate\n'
+    printf '  5. 可用性校验（dracut 产物 / ZFS 模块 / ZBM active），M2 同步外置 EFI\n'
+    [ "$SNAPSHOT" -eq 1 ] && printf '  6. zfs release %s\n' "$HOLD_TAG"
+    exit "$ORDO_EXIT_OK"
+fi
+
+_running=$(detect_running_root)
+[ -n "$_running" ] || { ordo_bad "无法确认当前 ZFS 根数据集"; exit "$ORDO_EXIT_UNKNOWN"; }
+RUNNING_ROOT=$_running
+POOL=${RUNNING_ROOT%%/*}
+SNAP="$RUNNING_ROOT@$TAG"
+
+ordo_require_tools portageq nproc zfs modinfo sort
+_build_check="$CONF_DIR/check-build"
+[ -r "$_build_check" ] || { ordo_bad "缺少编译预检配置"; exit "$ORDO_EXIT_UNKNOWN"; }
+_jobs=$(portageq envvar MAKEOPTS) || { ordo_bad "无法读取实际 MAKEOPTS"; exit "$ORDO_EXIT_UNKNOWN"; }
+sh "$_build_check" jobs "$_jobs" || { _rc=$?; ordo_bad "MAKEOPTS 超限或无法判定"; exit "$_rc"; }
+sh "$_build_check" arc || { _rc=$?; ordo_bad "ZFS ARC 未限制或无法读取"; exit "$_rc"; }
+
+# 0) 空间预检：升级要下源码、编译要临时空间；空间不足时
+#    "编译到一半 ENOSPC" 比直接拒绝糟得多。
+_avail=$(zfs get -H -o value available "$POOL" 2>/dev/null || printf '')
+if [ -n "$_avail" ] && command -v numfmt >/dev/null 2>&1; then
+    _avail_b=$(numfmt --from=iec "$_avail" 2>/dev/null || printf '0')
+    if [ "${_avail_b:-0}" -gt 0 ] && [ "$_avail_b" -lt $((4 * 1024 * 1024 * 1024)) ]; then
+        ordo_warn "池 $POOL 可用空间仅 ${_avail}（<4G）—— 升级/DL 可能失败"
+    fi
+fi
+
+# 0.5) 确认（升级会动整个系统；自动化可 --yes 跳过）
+if [ "$ASSUME_YES" -eq 0 ] && [ -t 0 ]; then
+    printf '将升级 %s（快照 %s）。继续？[y/N] ' "$RUNNING_ROOT" "$SNAP"
+    read -r _ans
+    case "$_ans" in
+        y|Y|yes|YES) ;;
+        *) ordo_say "已取消"; exit "$ORDO_EXIT_OK" ;;
+    esac
+fi
+
+_m2=0
+if ordo_m2_boot; then
+    _m2=1
+    # shellcheck source=config/platform/m2/boot-sync.sh
+    . "$ORDO_ROOT/config/platform/m2/boot-sync.sh"
+    m2_boot_open "$POOL" || exit "$?"
+    _next_root=$(zpool get -H -o value bootfs "$POOL") || exit "$ORDO_EXIT_UNKNOWN"
+    [ "$_next_root" = "$RUNNING_ROOT" ] || ordo_die "当前根与 bootfs 不同，请先完成回滚重启"
+fi
+
+# 1) 快照（升级前的回滚点；$HOME_DATASET 是独立数据集，不在快照范围内）
+if [ "$SNAPSHOT" -eq 1 ]; then
+    ordo_say "创建快照 $SNAP"
+    zfs snapshot "$SNAP" || ordo_die "快照失败，中止升级"
+
+    # 用 hold 钉住，防止后续轮转/误删碰到正在使用的回滚点
+    if zfs hold "$HOLD_TAG" "$SNAP" 2>/dev/null; then
+        _held=1
+    else
+        ordo_die "无法 hold ${SNAP}，中止升级"
+    fi
+else
+    ordo_warn "跳过升级前快照（--no-snapshot）：本次升级没有回滚点"
+fi
+
+# 2) 同步
+ordo_say "同步 portage 树"
+if ! emerge --sync --quiet; then
+    ordo_die "emerge --sync 失败，中止升级并保留已有回滚点"
+fi
+
+# 3) 升级
+ordo_say "升级 @world"
+if ! emerge -uDN --keep-going @world; then
+    if [ "$_m2" -eq 1 ]; then
+        ordo_bad "升级未完成。外置盘的 ZFSBootMenu 恢复入口：/EFI/Ordo/ZFSBootMenu.EFI"
+    fi
+    ordo_bad "升级未完成。回滚方式（ZFSBootMenu 原生路径）："
+    cat >&2 <<ROLLBACK
+  1. 重启 → 进入 ZFSBootMenu
+  2. 在菜单里选中当前 BE（${RUNNING_ROOT}）
+  3. 按 Ctrl+S 进入快照子菜单
+  4. 选中 ${TAG}
+  5. 按 Ctrl+X（clone and promote）→ 得到可启动的影子系统
+  6. 启动该影子系统，在其中执行: ordo snap rollback ${TAG}
+ROLLBACK
+    # hold 保留：这正是用户要回滚的那个快照，不能在这里释放
+    exit "$ORDO_EXIT_BAD"
+fi
+
+# 配置迁移与下次启动检查共用失败状态。保留快照直至全部通过。
+_check_fail=0
+_unknown=0
+if [ "$RUN_MIGRATE" -eq 1 ]; then
+    ordo_say "运行待执行迁移"
+    if ! "$_dir/ordo-migrate"; then
+        ordo_bad "迁移失败，可手动重跑：doas ordo migrate"
+        _check_fail=1
+    fi
+fi
+
+ordo_say "升级后可用性校验"
+_kver=
+if [ "$_m2" -eq 1 ]; then
+    if m2_boot_select ""; then
+        _kver=$M2_RELEASE
+    else
+        _check_fail=1
+    fi
+else
+    _kver=$(
+        for _kernel in /boot/vmlinuz-*; do
+            [ -s "$_kernel" ] || continue
+            case "$_kernel" in (*.old|*.bak) continue ;; esac
+            printf '%s\n' "${_kernel#/boot/vmlinuz-}"
+        done | LC_ALL=C sort -V | tail -1
+    )
+    if [ -z "$_kver" ]; then
+        ordo_bad "找不到下次启动可用的内核"
+        _check_fail=1
+    elif [ -s "/boot/initramfs-${_kver}.img" ] || [ -s "/boot/initramfs-${_kver}" ]; then
+        ordo_ok "最新安装内核的 initramfs 存在（${_kver}）"
+    else
+        ordo_bad "最新安装内核缺少 initramfs（${_kver}）"
+        _check_fail=1
+    fi
+fi
+
+if [ -n "$_kver" ]; then
+    _zfs_mod=$(modinfo -k "$_kver" -F version zfs 2>/dev/null || true)
+    _zfs_usr=$(zfs version 2>/dev/null | sed -n '1s/^zfs-//p')
+    if [ -z "$_zfs_mod" ] || [ -z "$_zfs_usr" ]; then
+        ordo_warn "无法读取 ${_kver} 的 ZFS 模块或用户态版本"
+        _unknown=1
+    elif [ "$_zfs_mod" != "$_zfs_usr" ]; then
+        ordo_bad "${_kver} 的 ZFS 模块 ${_zfs_mod} 与用户态 ${_zfs_usr} 不一致"
+        _check_fail=1
+    else
+        ordo_ok "ZFS 模块版本与用户态一致（${_zfs_usr}）"
+    fi
+fi
+
+if _zbm=$(zfs get -H -o value org.zfsbootmenu:active "$RUNNING_ROOT"); then
+    if [ "$_zbm" = on ]; then
+        ordo_ok "当前 BE 的 ZBM 属性为 active=on"
+    else
+        ordo_bad "当前 BE 的 ZBM 属性为 active=${_zbm}"
+        _check_fail=1
+    fi
+else
+    ordo_warn "无法读取当前 BE 的 ZBM 属性"
+    _unknown=1
+fi
+
+if [ "$_m2" -eq 1 ] && [ "$_check_fail" -eq 0 ] && [ "$_unknown" -eq 0 ]; then
+    if ! m2_boot_check_initrd "$M2_INITRD" "$_zfs_usr" forward && ! m2_boot_build_initrd "$_zfs_usr"; then
+        ordo_bad "Asahi initramfs 缺少 USB/ZFS 引导支持（$M2_RELEASE）"
+        _check_fail=1
+    elif m2_boot_publish; then
+        ordo_ok "M2 外置 EFI 与 extlinux 已同步（$M2_RELEASE）"
+    else
+        _check_fail=1
+    fi
+fi
+
+if [ "$_check_fail" -ne 0 ] || [ "$_unknown" -ne 0 ]; then
+    if [ "$_held" -eq 1 ]; then
+        ordo_warn "快照 $SNAP 仍保留 hold"
+    fi
+    ordo_bad "升级后的可用性尚未通过验收"
+    if [ "$_check_fail" -ne 0 ]; then exit "$ORDO_EXIT_BAD"; fi
+    exit "$ORDO_EXIT_UNKNOWN"
+fi
+_release_hold || ordo_die "验收已通过，但无法释放快照 hold：$SNAP"
+
+if command -v flatpak >/dev/null 2>&1; then
+    ordo_say "同步 Flatpak 应用（不阻塞系统升级）"
+    flatpak update -y --noninteractive || ordo_warn "Flatpak 更新失败（不影响系统）"
+fi
+
+echo
+if [ "$SNAPSHOT" -eq 1 ]; then
+    ordo_say "完成。回滚点：$SNAP"
+    ordo_say "如需回退：ordo snap rollback ${TAG}（自动 clone+promote+切 bootfs，重启生效）"
+else
+    ordo_say "完成（本次无快照，无回滚点）"
+fi
+
+exit "$ORDO_EXIT_OK"

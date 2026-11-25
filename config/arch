@@ -1,0 +1,39 @@
+# Ordo 架构定义 — 唯一事实来源（install.sh 读取）
+#
+# 切换架构只需改这里。默认 arm64（L1 目标）。
+# x86_64 真机：把 ARCH 改为 amd64，并按注释改 MARCH/VIDEO_CARDS。
+#
+# 注意：x86 与 AMD64 是同一架构（AMD64 = x86_64），本文件用 amd64 表示。
+
+ARCH="${ORDO_ARCH:-arm64}"
+
+case "$ARCH" in
+arm64)
+    STAGE3_FLAVOR="arm64"
+    STAGE3_TARBALL="stage3-arm64-openrc"
+    PROFILE="default/linux/arm64/23.0/desktop"
+    MARCH="armv8.2-a"
+    VIDEO_CARDS="virtio virgl"
+    ACCEPT_ARCH_KEYWORD="~arm64"
+    ;;
+amd64)
+    STAGE3_FLAVOR="amd64"
+    STAGE3_TARBALL="stage3-amd64-openrc"
+    PROFILE="default/linux/amd64/23.0/desktop"
+    # 真机用 native（需在目标机编译）；VM 用 x86-64-v3
+    MARCH="${ORDO_MARCH:-x86-64-v3}"
+    # 按实际显卡改：AMD=amdgpu radeonsi / Intel=i915 intel / NVIDIA 专有驱动另配
+    VIDEO_CARDS="${ORDO_VIDEO_CARDS:-amdgpu radeonsi i915 intel}"
+    ACCEPT_ARCH_KEYWORD="~amd64"
+    ;;
+*)
+    echo "未知架构: $ARCH（支持 arm64 / amd64）" >&2
+    exit 1
+    ;;
+esac
+
+STAGE3_BASE="https://mirrors.ustc.edu.cn/gentoo/releases/${STAGE3_FLAVOR}/autobuilds"
+STAGE3_LATEST_TXT="latest-${STAGE3_TARBALL}.txt"
+
+# Gentoo Automated Weekly Release Key（签名子钥按所属主钥核对）。
+STAGE3_GPG_FINGERPRINT="${ORDO_STAGE3_GPG_FPR:-13EBBDBEDE7A12775DFDB1BABB572E0E2D182910}"

@@ -1,0 +1,33 @@
+#!/bin/sh
+# Verify the signed checksum and write a single checksum for the expected archive.
+set -eu
+
+workdir=$1
+fingerprint=$2
+archive=$3
+case "$fingerprint" in
+    *[!0-9A-F]*) exit 1 ;;
+esac
+[ "${#fingerprint}" -eq 40 ] || exit 1
+cd "$workdir"
+mkdir -m 700 gnupg
+if [ -r /usr/share/openpgp-keys/gentoo-release.asc ]; then
+    gpg --homedir "$PWD/gnupg" --batch --import /usr/share/openpgp-keys/gentoo-release.asc
+else
+    gpg --homedir "$PWD/gnupg" --batch --keyserver hkps://keys.gentoo.org --recv-keys "$fingerprint"
+fi
+gpg --homedir "$PWD/gnupg" --batch --status-fd 3 --output stage3.clear \
+    --decrypt stage3.sha256 3> stage3.status
+awk -v fingerprint="$fingerprint" '
+    $1 == "[GNUPG:]" && $2 == "VALIDSIG" && ($3 == fingerprint || $12 == fingerprint) { valid=1 }
+    $1 == "[GNUPG:]" && $2 ~ /^(BADSIG|ERRSIG|EXPSIG|EXPKEYSIG|REVKEYSIG)$/ { invalid=1 }
+    END { exit !(valid && !invalid) }
+' stage3.status
+awk -v archive="$archive" '
+    length($1) == 64 && $1 ~ /^[0-9a-fA-F]+$/ && NF == 2 &&
+        ($2 == archive || $2 == "*" archive) {
+        print tolower($1) "  " archive
+        count++
+    }
+    END { exit (count != 1) }
+' stage3.clear > stage3.verified

@@ -1,0 +1,751 @@
+#!/bin/sh
+# doctor — 检查系统是否偏离"宪法"（只读体检；修复交给 ordo/sysup）
+# 本脚本不含策略：禁入 world 清单等策略数据读自 config/
+set -eu
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+ordo_require_tools awk sed grep cat printf head tail wc tr cut
+
+n_bad=0
+n_warn=0
+n_skip=0
+ok()   { printf '  \033[32m✔\033[0m %s\n' "$*"; }
+warn() { printf '  \033[33m!\033[0m %s\n' "$*"; n_warn=$((n_warn + 1)); }
+bad()  { printf '  \033[31m✘\033[0m %s\n' "$*"; n_bad=$((n_bad + 1)); }
+# skip = 无法判定。绝不能打绿勾：历史上四处假绿灯都源于「工具不在/文件不可读」
+# 被当成「检查通过」。skip 计进 n_skip，最终 exit 2。
+skip() { printf '  \033[36m-\033[0m %s\n' "$*"; n_skip=$((n_skip + 1)); }
+
+# 统计内核 CPU 列表里的核数（格式 "0-3"、"0-3,5"、"0"）
+count_cpus() {
+    printf '%s\n' "$1" | awk -F, '{
+        n = 0
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^[0-9]+-[0-9]+$/) { split($i, r, "-"); n += r[2] - r[1] + 1 }
+            else if ($i ~ /^[0-9]+$/)   { n += 1 }
+        }
+        print n
+    }'
+}
+
+echo "== 宪章一致性检查 =="
+
+# 1) 无 systemd —— 判 PID1 而不是 `command -v systemctl`
+#    【为什么】world 里装了 sys-apps/systemd-utils[boot]（ZBM 的 UEFI stub 需要），
+#    它**可能**提供 systemctl 命令，但 PID1 仍是 openrc-init。用「有没有这个命令」
+#    判「是不是 systemd 系统」，会在自己的合规机器上误报 ✘（2026-11-21 评审）。
+if [ -r /proc/1/comm ]; then
+    _init="$(cat /proc/1/comm 2>/dev/null)"
+    case "$_init" in
+        systemd) bad "PID1 是 systemd（宪法禁止）" ;;
+        openrc-init|init) ok "PID1 = ${_init}（无 systemd）" ;;
+        *) warn "PID1 = ${_init}（非 openrc-init，请确认不是 systemd 变体）" ;;
+    esac
+elif command -v systemctl >/dev/null 2>&1; then
+    warn "无法读取 /proc/1/comm；检测到 systemctl 命令（可能来自 systemd-utils，非 PID1）"
+else
+    skip "无法判定 init 系统（/proc/1/comm 不可读）"
+fi
+
+# 2) ZFS 根 —— 必须区分「运行的根」和「配置的规范名」
+#    【L1 实测教训】回滚后系统运行在 clone 上，此时只查 DATASET 存在会给假绿灯
+if ! command -v zfs >/dev/null 2>&1; then
+    skip "zfs 命令不存在，跳过全部 ZFS 检查（不是通过）"
+elif zfs list "$RUNNING_ROOT" >/dev/null 2>&1; then
+    ok "ZFS 根在运行（${RUNNING_ROOT}）"
+else
+    bad "运行中的根数据集 ${RUNNING_ROOT} 不存在"
+fi
+
+if is_rolled_back_env; then
+    warn "身份漂移：运行 ${RUNNING_ROOT}，配置规范名 ${DATASET}（回滚后的正常状态）"
+    warn "  规范化：ordo snap identity 查看步骤"
+fi
+
+# 3)-5) 快照新鲜度 / 水位 / ZBM 可见性 —— 全部依赖 zfs
+if ! command -v zfs >/dev/null 2>&1; then
+    skip "zfs 不可用：跳过快照新鲜度、快照水位、ZBM 可见性三项（不是通过）"
+else
+    last=$(zfs list -H -t snapshot -o name -s creation "$RUNNING_ROOT" 2>/dev/null | grep -F "@pre-update-" | tail -1 || true)
+    if [ -n "$last" ]; then ok "最近升级前快照: ${last#"$RUNNING_ROOT@"}"; else warn "没有升级前快照（首次升级后才会出现）"; fi
+
+    last_auto=$(zfs list -H -t snapshot -o name -s creation "$RUNNING_ROOT" 2>/dev/null | grep -F "@auto-" | tail -1 || true)
+    if [ -n "$last_auto" ]; then
+        ok "最近定时快照: ${last_auto#"$RUNNING_ROOT@"}"
+    else
+        warn "没有定时快照（ordo snap auto on 可启用）"
+    fi
+
+    # 快照占用水位（超过 50% 警告，超过 70% 报错）
+    used_snaps=$(zfs get -H -o value usedbysnapshots "$RUNNING_ROOT" 2>/dev/null || true)
+    avail=$(zfs get -H -o value available "$POOL" 2>/dev/null || true)
+    snap_b=$(numfmt --from=iec "${used_snaps:-0}" 2>/dev/null || printf '0')
+    avail_b=$(numfmt --from=iec "${avail:-0}" 2>/dev/null || printf '0')
+    snap_b="${snap_b:-0}"; avail_b="${avail_b:-0}"
+    if [ "$snap_b" -gt 0 ] && [ "$avail_b" -gt 0 ]; then
+        total_b=$((snap_b + avail_b))
+        pct=$((snap_b * 100 / total_b))
+        if [ "$pct" -gt 70 ]; then
+            bad "快照占用 ${used_snaps}（池的 ${pct}%，>70%）"
+        elif [ "$pct" -gt 50 ]; then
+            warn "快照占用 ${used_snaps}（池的 ${pct}%，>50%）"
+        else
+            ok "快照占用 ${used_snaps}（池的 ${pct}%）"
+        fi
+    else
+        skip "无法读取快照占用水位（不是通过）"
+    fi
+
+    # ZBM 引导可见性
+    zbm_active=$(zfs get -H -o value org.zfsbootmenu:active "$RUNNING_ROOT" 2>/dev/null || true)
+    case "$zbm_active" in
+        on) ok "ZBM 菜单可见（active=on）" ;;
+        *)  bad "ZBM 菜单不可见（org.zfsbootmenu:active=${zbm_active:-查不到}；应为 on）"
+            bad "  修复：zfs set org.zfsbootmenu:active=on $RUNNING_ROOT" ;;
+    esac
+fi
+
+# 6) 内核位置 —— ZBM 读的是数据集内的 /boot，不是 ESP
+#    【假绿灯修复】旧写法在 /boot 不存在或 findmnt 缺失时落入 else 打 ✔。
+#    现在：前置条件不满足一律 skip（exit 2），绝不冒充通过。
+if [ ! -d /boot ]; then
+    skip "/boot 不存在，无法判断内核位置（不是通过）"
+elif ! command -v findmnt >/dev/null 2>&1; then
+    skip "findmnt 不可用，无法判断 /boot 挂载类型（不是通过）"
+else
+    _bootfs="$(findmnt -no FSTYPE --target /boot 2>/dev/null)" || _bootfs=
+    case "$_bootfs" in
+        vfat|msdos|fat|fat32)
+            bad "/boot 挂载在 ESP（${_bootfs}）上 —— ZBM 读不到新内核"
+            bad "  应改为：ESP 挂 /efi，/boot 留在数据集内" ;;
+        "")
+            skip "无法读取 /boot 挂载类型（不是通过）" ;;
+        zfs)
+            ok "/boot 在数据集内（${_bootfs}；ZBM 可读）" ;;
+        *)
+            bad "/boot 的文件系统为 ${_bootfs}，ZBM 需要数据集内的内核" ;;
+    esac
+fi
+
+# 7) 定时快照是否真正生效（三要素）
+if [ -f /etc/cron.d/ordo-snapshot ]; then
+    cron_ok=1
+    [ -x /usr/local/bin/ordo-snap-auto ] || command -v ordo-snap-auto >/dev/null 2>&1 || cron_ok=0
+    if command -v rc-service >/dev/null 2>&1; then
+        rc-service cronie status 2>/dev/null | grep -q started || cron_ok=0
+    fi
+    if [ "$cron_ok" = "1" ]; then ok "定时快照链路完整"; else bad "定时快照配置了但未运行"; fi
+else
+    warn "定时快照未启用（ordo snap auto on）"
+fi
+
+# 8) world 里不该有应用级大件（清单是策略，放 config/forbidden-world）
+#    【假绿灯修复】旧写法只检查 forbidden-world 可读，不检查
+#    /var/lib/portage/world —— 后者不可读时 grep 恒失败 → 打印 ✔。
+#    【通配支持】条目以 /* 结尾时按类目前缀匹配（如 app-editors/* =
+#    整个编辑器类目禁入 world，AGENTS.md：编辑器走 Flatpak）；
+#    其余仍是精确 atom 比对（awk 字面量，不走正则，防 libc++ 崩）。
+if [ ! -r "$CONF_DIR/forbidden-world" ]; then
+    warn "缺少 $CONF_DIR/forbidden-world（无法检查 world）"
+elif [ ! -r /var/lib/portage/world ]; then
+    skip "/var/lib/portage/world 不可读，无法检查应用层边界（不是通过）"
+else
+    found=0
+    while IFS= read -r pkg; do
+        case "$pkg" in ''|\#*|\!*) continue ;; esac
+        if awk -v a="$pkg" '
+            function norm(x) {
+                sub(/[[:space:]]*#.*/, "", x); sub(/^[[:space:]]+/, "", x)
+                sub(/[[:space:]]+$/, "", x)
+                sub(/::.*/, "", x)          # 剥 ::repo 来源
+                sub(/:[^/]*$/, "", x)       # 剥 :slot
+                return x
+            }
+            {
+                b = norm($0)
+                if (a ~ /\/\*$/) { c = a; sub(/\/\*$/, "", c); if (index(b, c "/") == 1) f = 1 }
+                else if (b == a) f = 1
+            }
+            END { exit !f }
+        ' /var/lib/portage/world; then
+            bad "world 含应用级包: ${pkg}（应走 Flatpak）"
+            found=1
+        fi
+    done < "$CONF_DIR/forbidden-world"
+    # deselect ≠ 卸载：world 文件干净不代表系统干净——emerge --deselect 之后、
+    # depclean 之前的窗口期里禁入包二进制仍在盘上（2026-11-22 对抗审计实证）。
+    # 扫 /var/db/pkg 实际安装集，单次 awk 读两份输入，避免逐包 fork。
+    _hits="$(find /var/db/pkg -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
+        | sed 's|^/var/db/pkg/||' \
+        | awk -v badf="$CONF_DIR/forbidden-world" '
+            function norm(x) {
+                sub(/::.*/, "", x); sub(/:[^/]*$/, "", x)
+                gsub(/^[[:space:]]+|[[:space:]]+$/, "", x)
+                return x
+            }
+            FNR == NR {
+                b0 = norm($0); if (b0 == "") next
+                if (b0 ~ /^!/) { al[++m] = substr(b0, 2) } else { fb[++n] = b0 }
+                next
+            }
+            {
+                b = $0
+                for (j = 1; j <= m && !skip; j++) {
+                    e = al[j]
+                    if (b == e || (index(b, e) == 1 && substr(b, length(e)+1, 1) == "-")) skip = 1
+                }
+                if (skip) next
+                for (i = 1; i <= n; i++) {
+                    e = fb[i]
+                    if (e ~ /\/\*$/) {
+                        c = e; sub(/\/\*$/, "", c)
+                        if (index(b, c "/") == 1) { print b; exit }
+                    } else if (b == e || (index(b, e) == 1 && substr(b, length(e)+1, 1) == "-")) {
+                        print b; exit
+                    }
+                }
+            }')"
+    if [ -n "$_hits" ]; then
+        printf '%s\n' "$_hits" | while IFS= read -r _p; do
+            bad "已安装禁入包: $_p（deselect ≠ 卸载；doas emerge --depclean 收尾）"
+        done
+        found=1
+    fi
+    if [ "$found" -eq 0 ]; then ok "world 与已安装包均无应用级大件"; fi
+fi
+
+# 9) Flatpak 应用层 —— 宪法"Flatpak-first"的验收点
+#    只查 remote 不够：命令缺失/flathub 未配/沙箱跑不起来，都会让应用层归零
+if command -v flatpak >/dev/null 2>&1; then
+    ok "flatpak 已安装"
+    # flatpak remotes 是现行命令；remote-list 是旧别名（新版已移除），两者都试
+    if { flatpak remotes 2>/dev/null || flatpak remote-list 2>/dev/null; } | grep -q flathub; then
+        ok "Flathub 已配置"
+    else
+        warn "未配置 Flathub（应用层无来源：flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo）"
+    fi
+    # 冒烟：用已安装的 Flatpak 应用/运行时跑 --command=true（不启动真实 GUI）。
+    # 只看 remote 是纸面验收；能真正 exec 才证明 runtime + bwrap 沙箱可用。
+    # 有应用先跑应用（真实用户路径）；只有 runtime 时退而跑 runtime。
+    smoke_ref="$(flatpak list --app --columns=application 2>/dev/null | head -1 || true)"
+    [ -n "$smoke_ref" ] || \
+        smoke_ref="$(flatpak list --runtime --columns=application 2>/dev/null | head -1 || true)"
+    if [ -z "$smoke_ref" ]; then
+        warn "未安装 Flatpak 应用，无法冒烟（ordo app install <id>）"
+    elif flatpak run --command=true "$smoke_ref" >/dev/null 2>&1 \
+         || flatpak run --command=/bin/true "$smoke_ref" >/dev/null 2>&1; then
+        ok "Flatpak 冒烟通过（${smoke_ref} 可执行）"
+    else
+        bad "Flatpak 冒烟失败（${smoke_ref} 无法执行：runtime 缺失或沙箱不可用）"
+        bad "  排查：flatpak run ${smoke_ref}；flatpak list --runtime 看 runtime 是否齐"
+    fi
+else
+    bad "flatpak 命令不存在（宪法要求 Flatpak-first；emerge sys-apps/flatpak）"
+fi
+
+# 10) 中文
+# 注意两处坑：
+#   ① locale(1) 的输出受当前会话环境支配；SSH 非登录 shell 拿不到
+#      /etc/env.d/02locale 里的值 → 读文件更可靠。
+#   ② glibc 把 zh_CN.UTF-8 规范化成 zh_CN.utf8（locale -a 的写法），
+#      直接字符串比对会误报（2026-11-21 实测：LANG 明明是 zh_CN.UTF-8，
+#      locale -a 显示 zh_CN.utf8，doctor 报"不是 zh_CN.UTF-8"）。
+_lang=""
+for _f in /etc/env.d/02locale /etc/locale.conf; do
+    [ -r "$_f" ] && _lang=$(awk -F= '/^LANG=/{gsub(/"/,"",$2); print $2}' "$_f" 2>/dev/null | head -1)
+    [ -n "$_lang" ] && break
+done
+[ -n "$_lang" ] || _lang="${LANG:-}"
+case "$(printf '%s' "$_lang" | tr 'A-Z' 'a-z')" in
+    zh_cn.utf-8|zh_cn.utf8) ok "LANG=$_lang" ;;
+    *) warn "LANG 不是 zh_CN.UTF-8（当前: ${_lang:-未设置}）" ;;
+esac
+if ! command -v fc-list >/dev/null 2>&1; then
+    skip "fc-list 不可用，无法检查中文字体（不是通过）"
+elif fc-list 2>/dev/null | grep -qi "noto sans cjk"; then
+    ok "中文字体已安装"
+else
+    bad "缺少中文字体（emerge media-fonts/noto-cjk）"
+fi
+
+# 11) 池健康 + scrub 新鲜度
+if ! command -v zpool >/dev/null 2>&1; then
+    skip "zpool 命令不存在，跳过池健康检查（不是通过）"
+else
+    health=$(zpool list -H -o health "$POOL" 2>/dev/null || true)
+    case "$health" in
+        ONLINE) ok "池健康：ONLINE" ;;
+        DEGRADED) warn "池健康：DEGRADED（有设备异常）" ;;
+        "") skip "无法读取池 ${POOL} 健康状态（池未导入？不是通过）" ;;
+        *) bad "池健康：$health" ;;
+    esac
+fi
+
+if command -v zpool >/dev/null 2>&1; then
+    last_scrub=$(zpool status "$POOL" 2>/dev/null | grep -oE "scrub repaired.*on [A-Za-z]{3} [A-Za-z]{3} *[0-9]+ [0-9:]+ [0-9]{4}" | head -1 || true)
+    if [ -n "$last_scrub" ]; then
+        ok "最近 scrub: $(printf '%s' "$last_scrub" | grep -oE '[A-Za-z]{3} [A-Za-z]{3} *[0-9]+ [0-9:]+ [0-9]{4}')"
+    else
+        warn "从未 scrub（建议每月 zpool scrub ${POOL}）"
+    fi
+fi
+
+# 12) 登录管理器 —— 配置值与实际安装/运行的进程必须一致
+#     install.sh §14a 只写 /etc/conf.d/display-manager 并启用 display-manager 服务；
+#     若 DISPLAYMANAGER 指向的 DM 没装或没在跑，开机就只有黑屏。
+if [ -r /etc/conf.d/display-manager ]; then
+    dm="$(sed -n 's/^[[:space:]]*DISPLAYMANAGER="\{0,1\}\([^"]*\)"\{0,1\}.*$/\1/p' \
+        /etc/conf.d/display-manager 2>/dev/null | tail -1)"
+    # 未加引号的值可能带行尾注释/空白，截到第一个空白为止
+    case "$dm" in *[![:space:]]*) dm="${dm%%[[:space:]]*}" ;; esac
+    if [ -z "$dm" ]; then
+        bad "/etc/conf.d/display-manager 未设置 DISPLAYMANAGER（登录界面不会启动）"
+    elif ! command -v "$dm" >/dev/null 2>&1; then
+        bad "配置 DISPLAYMANAGER=\"${dm}\"，但 ${dm} 未安装（emerge 对应 DM，或改 DISPLAYMANAGER）"
+    elif pgrep -x "$dm" >/dev/null 2>&1 \
+         || pgrep -f "${dm}-wayland" >/dev/null 2>&1 \
+         || pgrep -f "${dm}-session" >/dev/null 2>&1; then
+        ok "登录管理器 ${dm}（配置=运行）"
+    else
+        bad "配置 DISPLAYMANAGER=\"${dm}\"，但未见 ${dm} 进程（display-manager 服务未起来？）"
+        bad "  排查：rc-service display-manager status; rc-update show default | grep display-manager"
+    fi
+else
+    warn "缺少 /etc/conf.d/display-manager（无图形登录界面）"
+fi
+
+# 13) 桌面栈完整性 —— 外壳只装一半会得到「有壁纸无栏」的半死会话
+#     【2026-11-22 换代】niri/ashell/waybar/SDDM 已随 ADR 0009 → 0011 退场：
+#     旧判据要么恒假红（niri/ashell 不在 world）、要么是死代码（waybar 恒不在）。
+#     改为检查当前真正在用的栈：Umbriel（合成器）/ Noctalia（外壳）/
+#     Luciole（文件管理）/ Greeter（登录屏）。
+if command -v umbriel >/dev/null 2>&1; then
+    if pgrep -x umbriel >/dev/null 2>&1; then
+        ok "合成器 umbriel 运行中"
+    else
+        warn "umbriel 已安装但未运行（SSH 会话属正常；greetd 登录后才拉起会话）"
+    fi
+else
+    bad "umbriel 未安装（config/world 应包含 gui-wm/umbriel）"
+fi
+
+if command -v noctalia >/dev/null 2>&1; then
+    if pgrep -x noctalia >/dev/null 2>&1; then
+        ok "外壳 noctalia 运行中"
+    else
+        warn "noctalia 已安装但未运行（umbriel 的 [general] autostart 应拉起它）"
+    fi
+else
+    bad "noctalia 未安装（config/world 应包含 gui-apps/noctalia）"
+fi
+
+if command -v luciole >/dev/null 2>&1; then
+    ok "文件管理 luciole 已安装（门户文件选择器）"
+else
+    bad "luciole 未安装（config/world 应包含 gui-apps/luciole）"
+fi
+
+# 登录屏：greeter 会话脚本与 greetd 配置必须成对存在，缺一开机黑屏。
+# 两者都在但配置指向别的会话也白搭，所以顺带核对 config.toml 引用 greeter。
+if [ -f /etc/greetd/config.toml ]; then
+    if command -v noctalia-greeter-session >/dev/null 2>&1; then
+        ok "greeter 就绪（noctalia-greeter-session + /etc/greetd/config.toml）"
+    else
+        bad "/etc/greetd/config.toml 存在，但 noctalia-greeter-session 不在 PATH"
+        bad "  修复：emerge gui-apps/noctalia-greeter（config/world 已声明）"
+    fi
+else
+    bad "缺少 /etc/greetd/config.toml（登录界面不会启动）"
+    bad "  修复：install.sh §13 部署 config/desktop/greetd/config.toml"
+fi
+
+# 会话文件：greetd 从这里读会话列表
+if [ -d /usr/share/wayland-sessions ]; then
+    if [ -f /usr/share/wayland-sessions/umbriel.desktop ]; then
+        ok "umbriel.desktop 会话文件存在"
+    else
+        bad "缺少 /usr/share/wayland-sessions/umbriel.desktop —— greetd 里选不到 Ordo 会话"
+        bad "  修复：install.sh §14e 写入该文件"
+    fi
+else
+    skip "/usr/share/wayland-sessions 不存在（未安装显示管理器会话？不是通过）"
+fi
+
+# 唯一栈守门：不得同时装两套同类组件（AGENTS.md 硬性约束）。
+# ADR 0011 后旧栈二进制若还在，改哪套生效就说不清了。
+for _legacy in niri ashell waybar; do
+    command -v "$_legacy" >/dev/null 2>&1 \
+        && bad "$_legacy 仍安装着（ADR 0011 已换成 Noctalia 全家桶；两套同类组件违反「一种正确做法」）"
+done
+
+# === CJK/IME 骨架占位（由后续 IME 检查段落接管：见下方「输入法」节） ===
+
+# 输入法：fcitx5 + rime（唯一路径；ibus 已废弃）
+if ! command -v fcitx5 >/dev/null 2>&1; then
+    bad "fcitx5 未安装（config/world 应包含 app-i18n/fcitx）"
+elif pgrep -x fcitx5 >/dev/null 2>&1; then
+    ok "输入法 fcitx5 运行中"
+else
+    warn "fcitx5 已安装但未运行（umbriel 的 [general] autostart 应拉起它）"
+fi
+if [ -f /etc/env.d/02locale ] && ! grep -q '^GTK_IM_MODULE=' /etc/env.d/99imm 2>/dev/null; then
+    warn "缺少 /etc/env.d/99imm（GTK_IM_MODULE/QT_IM_MODULE/XMODIFIERS 未统一设置）"
+fi
+
+# 14) CPU 上线核数 —— VM 上 -smp 4 可能只上线 1 核
+#     【L1 实测】present=0-3 而 online=0（CPU1-3: failed to come online）；
+#     编译时间因此翻数倍。--smp 参数给够不代表内核真的把核带起来。
+if [ -r /sys/devices/system/cpu/present ] && [ -r /sys/devices/system/cpu/online ]; then
+    cpu_present="$(cat /sys/devices/system/cpu/present 2>/dev/null || echo '')"
+    cpu_online="$(cat /sys/devices/system/cpu/online 2>/dev/null || echo '')"
+    n_present="$(count_cpus "$cpu_present")"
+    n_online="$(count_cpus "$cpu_online")"
+    n_proc="$(nproc 2>/dev/null || echo 0)"
+    # awk 意外缺失时保持纯数字，避免算术展开报错
+    n_present="${n_present:-0}"; n_online="${n_online:-0}"; n_proc="${n_proc:-0}"
+    if [ "$n_online" -lt "$n_present" ]; then
+        warn "CPU 未全部上线：present=${cpu_present}（${n_present} 核），online=${cpu_online}（${n_online} 核），差 $((n_present - n_online)) 核"
+        warn "  nproc=${n_proc}；编译并行度按 ${n_proc} 核。VM 排查 -smp 与 guest 内核日志中的 CPUx failed to come online"
+    else
+        ok "CPU 全部上线（${cpu_online}，${n_online} 核；nproc=${n_proc}）"
+    fi
+else
+    warn "无法读取 CPU present/online（/sys/devices/system/cpu/ 不可用）"
+fi
+
+# 15) 配置一致性（ADR 0008 OneConfig）
+#     检查 config/ 里的声明与实际系统是否漂移。委托给 ordo-config verify，
+#     本脚本不重复实现判据（避免两处规则打架）。
+#     注意：verify 在「有 ✘」时 exit 1，「有 !」时 exit 0 —— 这里把 ✘ 转成本脚本的 bad。
+if command -v ordo-config >/dev/null 2>&1 || [ -x "$_dir/ordo-config" ]; then
+    _cfg_out=""
+    _cfg_rc=0
+    if [ -x "$_dir/ordo-config" ]; then
+        _cfg_out="$("$_dir/ordo-config" verify 2>&1)" || _cfg_rc=$?
+    else
+        _cfg_out="$(ordo-config verify 2>&1)" || _cfg_rc=$?
+    fi
+    case "$_cfg_rc" in
+        0)  ok "配置一致" ;;
+        2)  skip "配置无法判定（ordo config verify 报「无法判定」；不是通过）"
+            printf '%s\n' "$_cfg_out" | grep -E '✘|\?' | head -5 | sed 's/^/    /' ;;
+        *)  bad "配置漂移（ordo config verify 报问题）"
+            printf '%s\n' "$_cfg_out" | grep -E '✘|\?' | head -5 | sed 's/^/    /'
+            bad "  修复：ordo config apply world（包集）/ 手动对齐 config/desktop/umbriel 等桌面资产" ;;
+    esac
+else
+    skip "ordo-config 不可用（无法检查配置一致性）"
+fi
+
+# 15.5) GUI state 覆盖声明 —— noctalia 把用户在 GUI 里的选择写进
+#       ~/.local/state/noctalia/settings.toml，运行时它压过声明
+#       （~/.config/noctalia/config.toml → /opt/ordo/config/desktop/noctalia/config.toml）。
+#       「config/ 是唯一事实来源」在这里被无声绕过：改声明不生效，因为 state
+#       还钉着旧值。2026-11-22 三次实机事故：state 钉旧壁纸（换壁纸不生效）、
+#       widget_order 缺新 widget（widget 不渲染）、plugins.enabled 被 GUI 改动覆盖；
+#       同日第四次：GUI 设置里动了 theme（source/community_palette/fill_mode），
+#       state 钉着 Tokyo Night，壁纸提取配色从此不生效。
+#       判据：state 与声明冲突 → bad；state 文件不存在（且能定位桌面用户）
+#       → 无覆盖（ok）；state/声明读不了或定位不到用户 → skip（不是通过）。
+#       覆盖的键族：wallpaper path 族 / widget_order / plugins.enabled /
+#       theme.source / theme.wallpaper_scheme / wallpaper.fill_mode /
+#       theme.community_palette（声明未定义时后者报 bad）。
+#       root 经 doas 跑 doctor 时 HOME=/root，真实桌面用户靠 /home 扫描定位；
+#       家目录不在 /home 下的环境判不了（skip），宁可不明判也不假绿灯。
+_ordo_state_home=""
+_ordo_state_ambig=0
+if [ -n "${HOME:-}" ] && [ -d "${HOME}/.local/state/noctalia" ]; then
+    _ordo_state_home="$HOME"
+else
+    _ordo_n_state=0
+    for _d in /home/*; do
+        [ -d "$_d/.local/state/noctalia" ] || continue
+        _ordo_n_state=$((_ordo_n_state + 1))
+        _ordo_state_home="$_d"
+    done
+    if [ "$_ordo_n_state" -gt 1 ]; then
+        _ordo_state_ambig=1
+        _ordo_state_home=""
+    fi
+fi
+_ordo_state_file="${_ordo_state_home}/.local/state/noctalia/settings.toml"
+_ordo_decl_file="$(readlink -f "${_ordo_state_home}/.config/noctalia/config.toml" 2>/dev/null || printf '%s' "${_ordo_state_home}/.config/noctalia/config.toml")"
+if [ "$_ordo_state_ambig" -eq 1 ]; then
+    skip "多个用户都有 noctalia GUI state，无法确定检查目标（不是通过）"
+elif [ ! -d "${_ordo_state_home}" ]; then
+    skip "定位不到桌面用户（/home 下无 noctalia state），无法检查 GUI state（不是通过）"
+elif [ ! -f "$_ordo_state_file" ]; then
+    ok "无 noctalia GUI state（GUI 从未覆盖声明）"
+elif [ ! -r "$_ordo_state_file" ]; then
+    skip "noctalia GUI state 不可读，无法比对（不是通过）"
+elif [ ! -r "$_ordo_decl_file" ]; then
+    skip "声明配置不可读（${_ordo_decl_file}），无法比对 GUI state（不是通过）"
+else
+    _gui_clean=1
+    # 一次 awk 同时读声明（文件1）与 state（文件2），输出问题行；
+    # 不用 -v 传多行数据（BSD awk 不收，020 用例会在开发机跑 doctor）。
+    # 约定：单行数组、值里不含 #（路径/清单都不含）——两份文件都是
+    # noctalia 自己写出的 TOML，满足。
+    _gui_issue="$(awk '
+        function collect(s, arr,   n) {
+            n = 0
+            while (match(s, /"[^"]*"/)) {
+                arr[++n] = substr(s, RSTART + 1, RLENGTH - 2)
+                s = substr(s, RSTART + RLENGTH)
+            }
+            return n
+        }
+        FNR == 1 { fno++ }
+        {
+            line = $0
+            sub(/[ \t]*#.*/, "", line)
+            if (line ~ /^[ \t]*\[/) {
+                cur = line
+                sub(/^[ \t]*\[/, "", cur); sub(/\][ \t]*$/, "", cur)
+                gsub(/^[ \t]+|[ \t]+$/, "", cur)
+                next
+            }
+            eq = index(line, "=")
+            if (eq == 0) next
+            k = substr(line, 1, eq - 1); gsub(/[ \t]/, "", k)
+            v = substr(line, eq + 1)
+            gsub(/^[ \t]+|[ \t]+$/, "", v)
+            gsub(/^"|"$/, "", v)
+            if (fno == 1) {   # 声明（config/ 唯一事实来源）
+                if (cur == "wallpaper.default" && k == "path") Dwp = v
+                if (cur == "desktop_widgets" && k == "widget_order") nD = collect(v, Dwo)
+                if (cur == "plugins" && k == "enabled") nDpl = collect(v, Dpl)
+                if (cur == "theme" && k == "source") Dsrc = v
+                if (cur == "theme" && k == "wallpaper_scheme") Dws = v
+                if (cur == "theme" && k == "community_palette") Dcomm = v
+                if (cur == "wallpaper" && k == "fill_mode") Dfm = v
+            } else {          # GUI state（会压过声明的运行时覆盖）
+                if (cur ~ /^wallpaper\./ && k == "path" && v != "") {
+                    Swp_n++
+                    Swp_sec[Swp_n] = cur
+                    Swp_val[Swp_n] = v
+                }
+                if (cur == "desktop_widgets" && k == "widget_order") nS = collect(v, Swo)
+                if (cur == "plugins" && k == "enabled") nSpl = collect(v, Spl)
+                if (cur == "theme" && k == "source" && v != "") Ssrc = v
+                if (cur == "theme" && k == "wallpaper_scheme" && v != "") Sws = v
+                if (cur == "theme" && k == "community_palette" && v != "") Scomm = v
+                if (cur == "wallpaper" && k == "fill_mode" && v != "") Sfm = v
+            }
+            next
+        }
+        END {
+            printf "WPDECL %s\n", Dwp
+            printf "THDECL %s|%s|%s|%s\n", Dsrc, Dws, Dfm, Dcomm
+            # theme 键族：state 钉了不同值 → 报；声明没定义而 state 钉了 → 报
+            if (Ssrc != "" && Dsrc == "") printf "THUNDECL theme.source=%s\n", Ssrc
+            else if (Ssrc != "" && Ssrc != Dsrc) printf "THSRC %s\n", Ssrc
+            if (Sws != "" && Dws == "") printf "THUNDECL theme.wallpaper_scheme=%s\n", Sws
+            else if (Sws != "" && Sws != Dws) printf "THWS %s\n", Sws
+            if (Sfm != "" && Dfm == "") printf "THUNDECL wallpaper.fill_mode=%s\n", Sfm
+            else if (Sfm != "" && Sfm != Dfm) printf "THFM %s\n", Sfm
+            if (Scomm != "" && Dcomm == "") printf "THCOMM %s\n", Scomm
+            else if (Scomm != "" && Scomm != Dcomm) printf "THCOMM %s\n", Scomm
+            if (Dwp == "" && Swp_n > 0)
+                for (i = 1; i <= Swp_n; i++) printf "WPUNDECL %s=%s\n", Swp_sec[i], Swp_val[i]
+            if (Dwp != "")
+                for (i = 1; i <= Swp_n; i++)
+                    if (Swp_val[i] != Dwp) printf "WPBAD %s=%s\n", Swp_sec[i], Swp_val[i]
+            if (nS > 0 && nD == 0) print "WONODECL"
+            if (nS > 0 && nD > 0) {
+                miss = ""
+                for (i = 1; i <= nD; i++) {
+                    f = 0
+                    for (j = 1; j <= nS; j++) if (Swo[j] == Dwo[i]) { f = 1; break }
+                    if (!f) miss = miss Dwo[i] " "
+                }
+                if (miss != "") printf "WOMISS %s\n", miss
+                else {
+                    same = (nS == nD)
+                    if (same) for (i = 1; i <= nD; i++) if (Swo[i] != Dwo[i]) { same = 0; break }
+                    if (!same) print "WOORDER"
+                }
+            }
+            if (nSpl > 0 && nDpl == 0) print "PLNODECL"
+            if (nSpl > 0 && nDpl > 0) {
+                diff = ""
+                for (i = 1; i <= nDpl; i++) {
+                    f = 0
+                    for (j = 1; j <= nSpl; j++) if (Spl[j] == Dpl[i]) { f = 1; break }
+                    if (!f) diff = diff "缺" Dpl[i] " "
+                }
+                for (j = 1; j <= nSpl; j++) {
+                    f = 0
+                    for (i = 1; i <= nDpl; i++) if (Dpl[i] == Spl[j]) { f = 1; break }
+                    if (!f) diff = diff "多" Spl[j] " "
+                }
+                if (diff != "") printf "PLDIFF %s\n", diff
+            }
+        }' "$_ordo_decl_file" "$_ordo_state_file")"
+    _wp_decl=""
+    _th_src=""; _th_ws=""; _th_fm=""; _th_comm=""
+    while IFS= read -r _row; do
+        [ -z "$_row" ] && continue
+        case "$_row" in
+            WPDECL*)
+                _wp_decl="${_row#WPDECL }" ;;
+            THDECL*)
+                _th_csv="${_row#THDECL }"
+                _th_src="$(printf '%s' "$_th_csv" | cut -d'|' -f1)"
+                _th_ws="$(printf '%s' "$_th_csv" | cut -d'|' -f2)"
+                _th_fm="$(printf '%s' "$_th_csv" | cut -d'|' -f3)"
+                _th_comm="$(printf '%s' "$_th_csv" | cut -d'|' -f4)" ;;
+            THSRC*)
+                bad "GUI state 钉了 theme.source=${_row#THSRC }（声明: ${_th_src:-未定义}）—— 壁纸提取配色被覆盖"
+                bad "  修复：把 state 的 [theme] source 改成与声明一致，或删掉该键后重启 shell"
+                _gui_clean=0 ;;
+            THWS*)
+                bad "GUI state 钉了 theme.wallpaper_scheme=${_row#THWS }（声明: ${_th_ws:-未定义}）"
+                bad "  修复：把 state 的 [theme] wallpaper_scheme 改成与声明一致，或删掉该键后重启 shell"
+                _gui_clean=0 ;;
+            THFM*)
+                bad "GUI state 钉了 wallpaper.fill_mode=${_row#THFM }（声明: ${_th_fm:-未定义}）"
+                bad "  修复：把 state 的 [wallpaper] fill_mode 改成与声明一致，或删掉该键后重启 shell"
+                _gui_clean=0 ;;
+            THCOMM*)
+                bad "GUI state 钉了 community_palette=${_row#THCOMM }（声明未定义社区调色板）—— GUI 改过 theme"
+                bad "  修复：删掉 state 的 [theme] community_palette（声明走 wallpaper 提取），重启 shell"
+                _gui_clean=0 ;;
+            THUNDECL*)
+                warn "声明未定义 ${_row#THUNDECL }（state 钉了该键但不受声明约束）"
+                _gui_clean=0 ;;
+            WPBAD*)
+                bad "GUI state 钉了旧壁纸（换壁纸不生效）: ${_row#WPBAD }（声明: ${_wp_decl:-未定义}）"
+                bad "  修复：把 ~/.local/state/noctalia/settings.toml 对应 [wallpaper.*] 的 path 改成与声明一致，或删掉该段后重启 shell"
+                _gui_clean=0 ;;
+            WPUNDECL*)
+                warn "声明未定义 wallpaper.default.path，state 的壁纸路径不受声明约束（${_row#WPUNDECL }）"
+                _gui_clean=0 ;;
+            WONODECL)
+                warn "GUI state 钉了 widget_order，但声明未定义 desktop_widgets.widget_order"
+                _gui_clean=0 ;;
+            WOMISS*)
+                bad "GUI state 的 widget_order 缺声明里的 widget: ${_row#WOMISS }（缺的不会渲染）"
+                bad "  修复：把 state 的 [desktop_widgets] widget_order 改成与声明一致，或删掉该段后重启 shell"
+                _gui_clean=0 ;;
+            WOORDER)
+                warn "GUI state 的 widget_order 顺序与声明不一致（state 胜出；拖拽后未回填声明）"
+                _gui_clean=0 ;;
+            PLNODECL)
+                warn "GUI state 钉了 plugins.enabled，但声明未定义 [plugins]"
+                _gui_clean=0 ;;
+            PLDIFF*)
+                bad "GUI state 覆盖 plugins.enabled（与声明不一致）: ${_row#PLDIFF }"
+                bad "  修复：noctalia msg plugins enable/disable 对齐声明，或回填 [plugins] 后重启 shell"
+                _gui_clean=0 ;;
+        esac
+    done <<EOF
+$_gui_issue
+EOF
+    if [ "$_gui_clean" -eq 1 ]; then
+        ok "GUI state 与声明一致（壁纸路径 / widget_order / plugins.enabled / theme 键族）"
+    fi
+fi
+
+# 16) 空闲挂起禁用 —— VM/无人值守场景的硬性要求
+#     【2026-11-20 事故】powerdevil 空闲挂起把 VM 挂起后，aarch64 QEMU virt
+#     机器的 QMP system_wakeup 报 "wake-up from suspend is not supported"，
+#     无法唤醒；只能复位，而复位后 dracut 强制导入 ZFS 池会全核软锁死。
+#     自动化任务（编译/安装/验收）跑在无人值守的 VM 上时，这条必须是 0。
+#     仅在「有 powerdevil 配置或检测到虚拟化」时检查，避免真机误报。
+if [ -n "${HOME:-}" ] && [ -f "$HOME/.config/powermanagementprofilesrc" ]; then
+    _idle_bad=""
+    for grp in AC Battery UPS LowBattery; do
+        _v="$(sed -n "/^\[$grp\]\[SuspendSession\]/,/^\[/p" "$HOME/.config/powermanagementprofilesrc" 2>/dev/null \
+              | sed -n 's/^idleAction=//p' | head -1)"
+        [ -n "$_v" ] && [ "$_v" != "0" ] && _idle_bad="$_idle_bad $grp=$_v"
+    done
+    if [ -n "$_idle_bad" ]; then
+        if grep -q "^flags.*hypervisor" /proc/cpuinfo 2>/dev/null; then
+            bad "空闲挂起未禁用（$_idle_bad）—— VM 上这是致命配置，见 deviations 事故记录"
+            echo "    修复：kwriteconfig6 --file powermanagementprofilesrc --group AC --group SuspendSession --key idleAction 0"
+        else
+            warn "空闲挂起已启用（$_idle_bad）——真机上属正常，VM 上会致命"
+        fi
+    else
+        ok "空闲挂起已禁用（四组 idleAction=0）"
+    fi
+fi
+
+# 16.5) AGENTS.md「禁止事项」的机器判据
+#   评审发现：AGENTS.md 列了 7 条禁止事项，doctor 一条都没守。
+#   约定只有配上判据才算数——否则它只是注释。
+if [ -r /etc/portage/make.conf ]; then
+    # 与安装及 sysup 使用同一判据，读取 Portage 最终生效的值。
+    if [ -r "$CONF_DIR/check-build" ] && command -v portageq >/dev/null 2>&1 &&
+        _jobs=$(portageq envvar MAKEOPTS); then
+        _build_rc=0
+        sh "$CONF_DIR/check-build" jobs "$_jobs" || _build_rc=$?
+        case "$_build_rc" in
+            0) ok "MAKEOPTS 并行度在 nproc 范围内（${_jobs}）" ;;
+            1) bad "MAKEOPTS 并行度无上限或超过 nproc（${_jobs}）" ;;
+            *) skip "无法判定 MAKEOPTS 并行度" ;;
+        esac
+    else
+        skip "无法读取实际 MAKEOPTS 或编译检查规则"
+    fi
+
+    # (b) 不许宽泛 keyword（全局 ** 或 ~arch 只允许逐包）
+    _kw="$(sed -n 's/^[[:space:]]*ACCEPT_KEYWORDS="\(.*\)"/\1/p' /etc/portage/make.conf 2>/dev/null | tail -1)"
+    case "$_kw" in
+        *\*\**)
+            bad "make.conf 的 ACCEPT_KEYWORDS 含宽泛 **（只允许逐包，见 package.accept_keywords/）" ;;
+        *~*)
+            # 全局 ~arch 是 deviations #1 登记的已知偏离，报 warn 而不是 bad
+            warn "make.conf 的 ACCEPT_KEYWORDS 含全局 ~arch（偏离 #1；收回条件见 deviations）" ;;
+        *)  ok "make.conf 无宽泛 keyword" ;;
+    esac
+else
+    skip "/etc/portage/make.conf 不可读，跳过 MAKEOPTS/keyword 检查（不是通过）"
+fi
+
+# (c) 编译入口与 doctor 共用 zfs_arc_max 判据。
+if [ -r "$CONF_DIR/check-build" ]; then
+    _build_rc=0
+    sh "$CONF_DIR/check-build" arc 2>/dev/null || _build_rc=$?
+    case "$_build_rc" in
+        0) ok "zfs_arc_max 已设上限" ;;
+        1) bad "zfs_arc_max=0（未限 ARC）；编译前应应用 config/zfs-arc.start" ;;
+        *) skip "无法读取 zfs_arc_max" ;;
+    esac
+else
+    skip "缺少 zfs_arc_max 检查规则"
+fi
+
+# (d) 只允许一套回滚机制：ZFS BE。
+#     判据：除 ZFS 外不得存在 btrfs snapshot / snapper / timeshift 之类第二套。
+_second=""
+for _c in snapper timeshift btrfs; do
+    command -v "$_c" >/dev/null 2>&1 && _second="$_second $_c"
+done
+if [ -n "$_second" ]; then
+    bad "检测到第二套回滚/快照工具:${_second}（宪法：只用 ZFS BE）"
+else
+    ok "只有 ZFS BE 一套回滚机制"
+fi
+
+
+echo
+if [ "$n_bad" -gt 0 ]; then
+    printf '✘ %d 个问题（另有 %d 个警告' "$n_bad" "$n_warn"
+    [ "$n_skip" -gt 0 ] && printf '、%d 项无法判定' "$n_skip"
+    printf '）\n'
+    exit "$ORDO_EXIT_BAD"
+elif [ "$n_skip" -gt 0 ]; then
+    # 无法判定 ≠ 通过：CI 与脚本必须能区分这两种状态
+    printf '? %d 项无法判定（另有 %d 个警告）—— 不计为通过\n' "$n_skip" "$n_warn"
+    exit "$ORDO_EXIT_UNKNOWN"
+elif [ "$n_warn" -gt 0 ]; then
+    printf '! %d 个警告\n' "$n_warn"
+    exit "$ORDO_EXIT_OK"
+else
+    printf '全部通过\n'
+    exit "$ORDO_EXIT_OK"
+fi

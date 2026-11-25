@@ -1,0 +1,36 @@
+# 真机硬件 USE 调整（L3 启用；VM 不需要）
+#
+# 【注意】本文件是 package.use 片段，**只放 USE 标志**。
+#   「装哪些包」属于 world 的职责，不属于 package.use ——
+#   旧版这里混入了 net-wireless/wpa_supplicant 等裸包名，
+#   等于在 USE 文件里写包清单，install.sh 会把它当 USE 值塞给 Portage。
+#
+# 用法（真机安装时）：
+#   ORDO_PLATFORM=bare-metal sh install.sh
+#   install.sh 会把本文件复制到 /etc/portage/package.use/real-hardware
+#
+# 真机还需要改 config/arch：
+#   x86_64：ORDO_ARCH=amd64（MARCH/VIDEO_CARDS 已按注释给出默认值）
+#   arm64（Asahi 等）：-march 按芯片改，VIDEO_CARDS="asahi"
+
+# ---- 显卡（按实际硬件选一个，其余注释掉） ----
+# AMD：
+media-libs/mesa               video_cards_amdgpu video_cards_radeonsi
+# Intel：
+#media-libs/mesa               video_cards_i915 video_cards_intel
+# NVIDIA 专有：需额外装 x11-drivers/nvidia-drivers，Mesa 走 vulkan
+
+# ---- 音频（现代笔记本需要） ----
+media-libs/alsa-lib           -systemd
+#   -systemd：音频栈的 systemd 集成（我们不用）
+
+# ---- 电源（笔记本） ----
+sys-power/upower              elogind
+#   elogind：电池事件走 elogind（无 systemd）
+
+# ---- 微码（安全；按 CPU 厂商选） ----
+# Intel：
+sys-firmware/intel-microcode  initramfs
+#   initramfs：微码打进 initramfs（在加载内核模块前生效，才能修 CVE）
+# AMD：
+#sys-firmware/amd-ucode       initramfs

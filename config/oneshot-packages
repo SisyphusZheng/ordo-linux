@@ -1,0 +1,17 @@
+# oneshot 包白名单（不进 world，但装过）
+#
+# 背景：install.sh 有些步骤只需要某个工具「跑一次」——装完就完成了使命。
+# 把它们放进 world 会让世界集变脏（depclean 永远不敢动它们，升级时要跟着编）；
+# 完全不声明，doctor 的「装了但没声明」检查又会天天报警。
+#
+# 所以：**声明这里**。doctor 与 verify 在比对 world 时会跳过本清单里的 atom。
+#
+# 规则：每条必须附一行理由 + 为什么不需要长期存在。
+#       需要长期存在的运行时依赖 → 进 config/world，不进这里。
+
+app-eselect/eselect-repository   # 只在 install.sh 启用 GURU overlay 时用一次
+app-arch/unzip                   # 解 GURU/misc 的 zip 源，仅安装期需要
+dev-python/pillow                # 破环种子（deviations #3），之后由依赖树正常带入
+app-portage/pycargoebuild        # 曾为 ashell overlay ebuild 生成 crate 清单；
+                                 # ashell 已随 ADR 0011 退场。未来写 crate ebuild
+                                 # 时再手动 emerge，不占 world

@@ -1,0 +1,44 @@
+#!/bin/sh
+# ============================================================
+# Ordo — ZFS ARC 上限（core 层声明）
+# 由 install.sh 安装为 /etc/local.d/zz-zfs-arc.start（可执行）
+# ============================================================
+#
+# 为什么必须设：
+#   zfs_arc_max=0（默认）= 按物理内存比例算，在 8 GB 机器上 c_max 会算到
+#   6.7 GB（85%），只剩 1.2 GB 给所有用户态进程。编译 clang/llvm 这类单文件
+#   峰值 2-3 GB 的包时，内核会陷入 direct reclaim 活锁：连 OOM killer 都排
+#   不上，网络中断也无法处理（ARP 不回、sshd 不吐 banner、guest agent 无响
+#   应），但 vCPU 仍 100% 空转。症状看起来像"还在编译"，实际已经死了
+#   —— 2026-11-20 实测 qcow2 停滞 50 分钟零字节写入。
+#
+# 为什么不用 /etc/modprobe.d/zfs.conf：
+#   root=ZFS=... 意味着 initramfs 阶段就要加载 zfs 并挂载根。实测两条都无效：
+#     ① /etc/modprobe.d/zfs.conf —— 那时 /etc 还没挂上
+#     ② dracut install_items 打进 initramfs —— dracut 的 zfs 模块是 insmod
+#        直接加载模块文件，不经过 modprobe，modprobe.d 被完全绕过
+#   （2026-11-21 两次重实验证，重启后 zfs_arc_max 都是 0）
+#
+# 采用方式：OpenRC local 服务（default runlevel，zfs 已加载之后）写 sysfs。
+#   写 /sys/module/zfs/parameters/zfs_arc_max 会立即触发 ARC shrink，
+#   不需要重启，且 100% 可靠（2026-11-21 重启复验通过）。
+#
+# 取值：物理内存的 40%。sysfs 不接受表达式，故运行时计算。
+#   宿主/真机 ≥16 GB 时可放宽到 50-60%，但绝不留 0。
+
+MEM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo)
+ARC_MAX=$(( MEM_KB * 1024 * 40 / 100 ))
+
+[ -w /sys/module/zfs/parameters/zfs_arc_max ] || exit 0
+
+CUR=$(cat /sys/module/zfs/parameters/zfs_arc_max)
+if [ "$CUR" != "$ARC_MAX" ]; then
+    echo "$ARC_MAX" > /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null \
+        && logger -t ordo-arc "ARC 上限设为 $((ARC_MAX/1024/1024)) MiB（原值 $CUR）"
+fi
+
+# 压一下 ARC 的元数据开销：小内存机上 dnode 缓存按 1/4 而非默认给
+[ -w /sys/module/zfs/parameters/zfs_arc_dnode_limit_percent ] && \
+    echo 25 > /sys/module/zfs/parameters/zfs_arc_dnode_limit_percent 2>/dev/null
+
+exit 0

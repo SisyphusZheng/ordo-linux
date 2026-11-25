@@ -1,0 +1,8 @@
+media-libs/mesa::gentoo
+x11-apps/mesa-progs
+sys-power/upower
+media-libs/libv4l
+media-sound/alsa-utils
+=media-libs/alsa-ucm-conf-asahi-10::asahi
+~media-libs/asahi-audio-4.1::asahi
+=sys-apps/speakersafetyd-2.0.1::asahi

@@ -1,0 +1,2 @@
+# The Asahi audio ebuild requires Asahi kernel sources, provided here without changing /usr/src/linux.
+=sys-kernel/asahi-sources-7.2.12_p2::asahi ~arm64

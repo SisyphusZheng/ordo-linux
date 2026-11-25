@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <clipPath id="upper"><path d="M0 0h512v49L0 458z"/></clipPath>
+    <clipPath id="lower"><path d="M512 61v451H0v-42z"/></clipPath>
+    <path id="ring" fill-rule="evenodd" d="M252 74c102 0 158 72 158 186s-56 187-158 187S91 374 91 260 150 74 252 74zm0 65c-53 0-81 47-81 121s28 122 81 122 78-48 78-122-25-121-78-121z"/>
+  </defs>
+  <use href="#ring" clip-path="url(#upper)" fill="#b9a4fa"/>
+  <use href="#ring" clip-path="url(#lower)" fill="#f4dfc7"/>
+</svg>

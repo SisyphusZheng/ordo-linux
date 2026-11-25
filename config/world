@@ -1,0 +1,112 @@
+# ordo — 系统层包集合（@world）
+#
+# 【本文件只允许裸 atom，禁止行内注释】
+# 原因：install.sh 会把本文件原样 cp 进 /var/lib/portage/world。
+# Portage 的 world 文件不认行内注释，而 verify 的比对管线一旦两侧
+# 解析口径不同，就会报 31 条「多余的包」+ 31 条「缺包」的幻影漂移
+# （2026-11-21 评审实测）。注释与理由全部移到 config/world.notes。
+
+
+# ---- 基座 ----
+sys-apps/baselayout
+sys-apps/openrc
+sys-apps/util-linux
+sys-apps/coreutils
+sys-apps/kmod
+app-admin/doas
+sys-apps/flatpak
+net-misc/rsync
+
+# ---- 构建工具 ----
+dev-util/ccache
+llvm-core/clang
+
+# ---- 内核与 ZFS ----
+sys-kernel/gentoo-kernel-bin
+sys-fs/zfs
+sys-kernel/dracut
+sys-apps/systemd-utils
+sys-boot/zfsbootmenu
+
+# ---- 网络与时间 ----
+net-misc/networkmanager
+net-misc/dhcpcd
+net-misc/openssh
+net-misc/chrony
+
+# ---- 无线 ----
+net-wireless/bluez
+net-wireless/wpa_supplicant
+net-wireless/wireless-regdb
+net-wireless/iw
+
+# ---- 桌面外壳（Noctalia 全家桶，ADR 0011）----
+# 登录：greetd（守护进程）+ Noctalia Greeter（图形前端），零 GTK/Qt 依赖
+gui-libs/greetd
+sys-apps/xdg-desktop-portal
+sys-apps/xdg-desktop-portal-umbriel
+# portal-gtk 保留：Flatpak 应用通过它读 Settings portal（深浅色）
+sys-apps/xdg-desktop-portal-gtk
+
+# ---- 音频（Noctalia 音量 OSD/频谱 widget 依赖）----
+# 为什么在 world 而不是 Flatpak：音频栈是系统服务（D-Bus 激活、PulseAudio 协议），
+# 沙箱里的应用无法提供它。这属于 README 的"驱动/系统层"，不是应用层。
+media-video/pipewire
+media-video/wireplumber
+# ---- 桌面功能组件 ----
+# 媒体键落地工具（umbriel XF86AudioPlay/Next/Prev 绑定调用）。
+# 亮度走 noctalia msg brightness-*，无需 brightnessctl。
+media-sound/playerctl
+gui-apps/wl-clipboard
+gui-apps/grim
+gui-apps/slurp
+gui-apps/noctalia
+gui-wm/umbriel
+gui-apps/luciole
+gui-apps/noctalia-greeter
+
+# ---- 终端 ----
+x11-terms/wezterm
+
+# ---- 中文开箱 ----
+media-fonts/noto-cjk
+app-i18n/fcitx
+app-i18n/fcitx-rime
+sys-libs/timezone-data
+
+# ---- GTK 主题与图标（config/skel/.config/gtk-*/settings.ini 引用）----
+# 缺这两个包时，GTK 应用会显示默认灰主题 —— 配置写了但没东西可加载。
+x11-themes/arc-theme
+x11-themes/papirus-icon-theme
+# ---- 字体 ----
+media-fonts/nerdfonts
+media-fonts/symbols-nerd-font
+media-fonts/jetbrains-mono
+
+# ---- 用户 shell（config/skel 的 .zshrc 依赖）----
+app-shells/zsh
+app-shells/starship
+app-shells/zsh-autosuggestions
+app-shells/zsh-syntax-highlighting
+app-shells/gentoo-zsh-completions
+
+# ---- CLI 工具 ----
+app-shells/zoxide
+sys-apps/bat
+sys-apps/eza
+sys-apps/fd
+sys-apps/ripgrep
+sys-process/btop
+app-misc/fastfetch
+app-misc/tmux
+
+# ---- 系统服务 ----
+sys-process/cronie
+
+# ---- 引导/文件系统工具 ----
+sys-boot/efibootmgr
+sys-fs/dosfstools
+
+# ---- 开发基础 ----
+dev-vcs/git
+dev-lang/python

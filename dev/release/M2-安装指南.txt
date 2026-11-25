@@ -1,0 +1,17 @@
+Ordo Linux · M2 Air 候选版
+
+适用 MacBook Air 13 英寸（M2，2022，Mac14,2）。请把安装包完整解压到 macOS 的内置盘上，准备一块可以清空的外接 USB 盘（至少 64 GB）。下载、解压和制作期间建议内置盘留出 12 GB 可用空间。首次建立 Asahi 引导入口还需要官方安装器显示的空间。双击 Install.command 后，安装器会先校验候选版签名与文件。看到端口权限或可移动卷宗访问提示时，按屏幕说明认证。
+
+候选版签名
+本包使用 Ordo 的候选版签名，尚未获得 Apple Developer ID 公证。从其他人处取得下载包时，可先将整个压缩包的 SHA-256 与发布清单核对。macOS 若提示无法验证开发者，确认来源和摘要后，可按 Apple 对单个应用的说明操作。
+https://support.apple.com/zh-cn/102445
+
+首次设置 Apple Silicon 引导
+在仅装 macOS 的新机上，安装器会提供 Asahi 的官方安装流程。选择 UEFI environment only。如需腾出引导空间，在官方安装器内完成。按其屏幕提示进入恢复环境，用这台 Mac 的所有者账户完成认证。macOS 和 Ordo 的引导各自独立。完成后长按电源键选择 macOS，回到本安装包重新打开 Install.command。此时安装器会从本机的引导分区读取相应固件。官方入口更新或找不到可用固件时会显示原因。
+参考 https://asahilinux.org/docs/alt/policy/#installation-procedure
+
+制作与首次启动
+在安装器列出的磁盘中根据容量、名称选择目标盘。安装器会显示清盘确认；清盘会移除该外接盘原有的全部内容。完成制作后，外接盘同时存放 EFI 引导文件和 Ordo 系统。关机，保持外接盘连接，长按电源直到显示启动选项，选择首次设置的 Ordo / Asahi 入口。根据安装界面确认目标并设置自己的密码。首次启动进入 Umbriel 桌面。以后可用 Mac 的启动选项返回 macOS。
+
+检查与恢复
+进入桌面后运行 ordo doctor，再查看 ~/.local/state/ordo/m2-hardware.log 。检查 AGX 渲染、内屏静置是否闪烁、键盘触控板、Wi-Fi 和音频。升级前请阅读 definition/docs/manual/06-upgrade-rollback.md。安装器或引导遇到问题时，保留最后的错误消息，回到 macOS 可以重开安装包核对完整性。

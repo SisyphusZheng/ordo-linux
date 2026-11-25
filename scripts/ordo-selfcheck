@@ -1,0 +1,152 @@
+#!/bin/sh
+# ordo-selfcheck — 自检：usage 表 × case 分发 × 已安装软链 三者是否一致
+#
+# 用法：ordo selfcheck [--json]
+#
+# 【为什么需要】本项目历史上反复出现同一类漂移：
+#   - usage 里写着 `apply kde`，config/kde 早已删除
+#   - install.sh 软链了 ordo-doctor，而 ordo 分发时找的是 doctor
+#   - 621 命令规模的项目用「文件名即路由」自动发现来根治，Ordo 只有 9 个
+#     子命令，不需要那套机制，但需要一个能抓住「表与实现不一致」的检查。
+#
+# 判据三条：
+#   1) ordo 的 usage 里列出的子命令，在 case 分支里都存在
+#   2) case 分支里能分发的目标脚本，在 scripts/ 下都存在且可执行
+#   3) install.sh 声明的软链目标，与 scripts/ 下实际文件一致
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+ordo_require_tools awk sed grep head printf dirname basename cat tr
+
+JSON=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --json) JSON=1 ;;
+        -h|--help)
+            cat <<EOF
+用法: ordo selfcheck [--json]
+
+检查: usage 表 / case 分发 / install.sh 软链 三者是否一致。
+退出码: 0 一致 | 1 有漂移 | 2 无法判定
+EOF
+            exit "$ORDO_EXIT_OK"
+            ;;
+    esac
+done
+
+n_bad=0
+n_skip=0
+
+report() { # state message
+    if [ "$JSON" -eq 1 ]; then
+        printf '{"state":"%s","message":"%s"}\n' "$1" "$2"
+    else
+        case "$1" in
+            ok)   printf '  \033[32m✔\033[0m %s\n' "$2" ;;
+            bad)  printf '  \033[31m✘\033[0m %s\n' "$2" ;;
+            skip) printf '  \033[36m-\033[0m %s\n' "$2" ;;
+            info) printf '  \033[36m·\033[0m %s\n' "$2" ;;
+        esac
+    fi
+}
+
+ORDO_SH="$_dir/ordo"
+[ -f "$ORDO_SH" ] || { report bad "找不到 $_dir/ordo"; exit "$ORDO_EXIT_UNKNOWN"; }
+
+# ---- 1) usage 里列出的子命令 vs case 分支 ----
+# 取 usage 文本中的命令名：形如 "  <cmd> <args>" 或 "  <cmd>"
+_usage_cmds="$(sed -n '/^usage() {/,/^}/p' "$ORDO_SH" \
+    | sed -n 's/^  \([a-z][a-z-]*\)[[:space:]].*/\1/p' | sort -u)"
+_case_cmds="$(sed -n '/^case "\$cmd" in/,/^esac/p' "$ORDO_SH" \
+    | sed -n 's/^[[:space:]]*\([a-z][a-z-]*\)).*/\1/p' | sort -u)"
+
+_missing=""
+for _c in $_usage_cmds; do
+    printf '%s\n' "$_case_cmds" | grep -qx "$_c" || _missing="$_missing $_c"
+done
+if [ -n "$_missing" ]; then
+    report bad "usage 列了但 case 未实现:$_missing"
+    n_bad=$((n_bad + 1))
+else
+    report ok "usage 与 case 分支一致（$(printf '%s' "$_usage_cmds" | grep -c . | tr -d ' ') 个子命令）"
+fi
+
+# ---- 2) case 分支分发的目标脚本是否存在 ----
+_dispatch_targets="$(sed -n '/^case "\$cmd" in/,/^esac/p' "$ORDO_SH" \
+    | sed -n 's/.*_dispatch[[:space:]][[:space:]]*\([a-z][a-z-]*\).*/\1/p' | sort -u)"
+if [ -z "$_dispatch_targets" ]; then
+    report skip "未解析出 _dispatch 目标（不是通过）"
+else
+    _bad_target=""
+    for _t in $_dispatch_targets; do
+        [ -x "$_dir/$_t" ] || _bad_target="$_bad_target $_t"
+    done
+    if [ -n "$_bad_target" ]; then
+        report bad "分发了不存在的脚本:$_bad_target"
+        n_bad=$((n_bad + 1))
+    else
+        report ok "分发目标全部存在且可执行（$(printf '%s' "$_dispatch_targets" | grep -c . | tr -d ' ') 个）"
+    fi
+fi
+
+# ---- 3) install.sh 声明的软链 vs scripts/ 实际文件 ----
+INSTALL_SH="$ORDO_ROOT/install.sh"
+if [ ! -f "$INSTALL_SH" ]; then
+    # 已安装系统（/opt/ordo）不带 install.sh，这一项不适用。
+    # 这不是"无法判定"，而是"本环境没有这个检查对象"——不计入退出码。
+    report info "无 install.sh（已安装布局），跳过软链一致性检查"
+else
+    _bad_link=""
+    # 匹配形如: for _entry in ordo sysup ordo-snap ...; do
+    _entries="$(sed -n 's/.*for _entry in \(.*\); do.*/\1/p' "$INSTALL_SH" | head -1)"
+    if [ -z "$_entries" ]; then
+        report skip "未在 install.sh 中解析出入口清单（不是通过）"
+        n_skip=$((n_skip + 1))
+    else
+        for _e in $_entries; do
+            [ -f "$_dir/$_e" ] || _bad_link="$_bad_link $_e"
+        done
+        if [ -n "$_bad_link" ]; then
+            report bad "install.sh 声明安装但 scripts/ 缺失:$_bad_link"
+            n_bad=$((n_bad + 1))
+        else
+            report ok "install.sh 软链清单与 scripts/ 一致"
+        fi
+    fi
+
+    # doctor 的别名：install.sh 软链成 ordo-doctor，而 ordo 分发执行 doctor
+    if grep -q 'ln -sf /opt/ordo/scripts/doctor /usr/local/bin/ordo-doctor' "$INSTALL_SH"; then
+        [ -x "$_dir/doctor" ] || { report bad "install.sh 软链 doctor 但文件不存在"; n_bad=$((n_bad + 1)); }
+    fi
+fi
+
+# ---- 4) 每个脚本的 shebang 与可执行位 ----
+_bad_exec=""
+for _f in "$_dir"/*; do
+    [ -f "$_f" ] || continue
+    case "$_f" in *.sh) continue ;; esac   # 被 source 的库，不需要可执行
+    [ -x "$_f" ] || _bad_exec="$_bad_exec $(basename "$_f")"
+    head -1 "$_f" | grep -q '^#!/bin/sh' \
+        || report bad "$(basename "$_f") 的 shebang 不是 #!/bin/sh"
+done
+if [ -n "$_bad_exec" ]; then
+    report bad "以下脚本缺少可执行位:$_bad_exec"
+    n_bad=$((n_bad + 1))
+else
+    report ok "入口脚本均可执行且 shebang 正确"
+fi
+
+echo
+if [ "$n_bad" -gt 0 ]; then
+    [ "$JSON" -eq 0 ] && printf '✘ %d 项不一致\n' "$n_bad"
+    exit "$ORDO_EXIT_BAD"
+elif [ "$n_skip" -gt 0 ]; then
+    [ "$JSON" -eq 0 ] && printf '? %d 项无法判定\n' "$n_skip"
+    exit "$ORDO_EXIT_UNKNOWN"
+else
+    [ "$JSON" -eq 0 ] && printf '✔ 自检通过\n'
+    exit "$ORDO_EXIT_OK"
+fi

@@ -1,0 +1,13 @@
+# Gentoo Mesa builds the Apple AGX Gallium and Vulkan drivers for this platform.
+media-libs/mesa::gentoo video_cards_asahi vulkan
+dev-util/mesa_clc::gentoo video_cards_asahi
+# The acceptance command queries EGL from the logged-in Wayland session.
+x11-apps/mesa-progs gles2 wayland
+# The J413 DSP chain runs in PipeWire and uses the packaged LV2 filters.
+# V4L2 exposes the built-in camera to PipeWire clients.
+media-video/pipewire extra lv2 sound-server v4l
+media-libs/lsp-plugins lv2 -pipewire -vst3
+# Keep the currently selected build tree when installing this source dependency.
+sys-kernel/asahi-sources::asahi -symlink
+# v4l2-ctl queries and captures frames from the built-in camera.
+media-libs/libv4l utils -qt6

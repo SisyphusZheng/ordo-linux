@@ -1,0 +1,321 @@
+# Ordo 桌面外壳 —— Noctalia
+#
+# 顶栏、启动器、控制中心、通知、锁屏、壁纸、剪贴板历史、OSD、托盘，
+# 全部由这一个 TOML 管，热重载（保存即生效）。
+#
+# 校验：noctalia config validate
+
+[accessibility]
+ui_scale = 1.0
+font_scale = 1.0
+high_contrast = false
+
+# ==============================================================================
+# 颜色 —— 从壁纸提取，不硬编码色值
+#
+# 壁纸为 wallpaper-blackhole.png（黑洞星环，gen-blackhole.py 生成，
+# 复刻 noctalia v5 介绍视频 BV1suMc6vEam 的视觉基调）。
+#
+# 已知坑：GUI 里动过 theme（设置界面选调色板/填充模式）会把
+#   theme.source / theme.wallpaper_scheme / theme.community_palette /
+#   wallpaper.fill_mode 写进 ~/.local/state/noctalia/settings.toml，
+#   运行时压过本文件。取证命令（随时可复核，不依赖本注释的时效）：
+#
+#   ① 当前生效源（期望输出 "wallpaper faithful"，输出 community 即被覆盖）：
+#        noctalia msg color-scheme-get
+#   ② 谁覆盖的（doctor 15.5 比对 state 与本文件，GUI 动过必报 ✘）：
+#        doas /opt/ordo/scripts/doctor
+#   ③ 覆盖值原文：
+#        grep -A8 '^\[theme\]' ~/.local/state/noctalia/settings.toml
+#   ④ 提取色落点（出现 #7a88cf 一类蓝紫即 Tokyo Night 残留，非壁纸提取）：
+#        grep accent_primary ~/.config/umbriel/noctalia.toml
+#
+# 为什么不用自定义调色板：实测 `source = "custom"` 在 noctalia 5.6.0 下
+# 对所有候选路径都报 "custom palette not found or invalid" 并静默回退到
+# builtin（黄色），因此不可用。改用受支持的 wallpaper 源。
+# ==============================================================================
+[theme]
+mode = "dark"
+source = "wallpaper"
+wallpaper_scheme = "faithful"
+# 暗色表面钉到纯黑（geek 黑）
+pure_black_dark = true
+
+# ---- 模板：把调色板渲染到 Noctalia 之外的组件 ----
+#
+# Noctalia 自带 21 个官方模板，注册表在
+#   /usr/share/noctalia/assets/templates/builtin.toml
+# 每个条目自带 input_path / output_path / post_hook，不需要手写路径。
+#
+# 我们启用其中 6 个：
+#   umbriel   → ~/.config/umbriel/noctalia.toml（窗口边框/强调色）
+#   wezterm   → ~/.config/wezterm/colors/Noctalia.toml（终端配色）
+#   luciole   → ~/.config/luciole/colors.toml（文件管理器）
+#   gtk3/gtk4 → GTK 应用（Flatpak 的 Warehouse 等不再是一片白）
+#   qt        → qt5ct/qt6ct 配色（装了 Qt 应用时生效）
+[theme.templates]
+enable_builtin_templates = true
+builtin_ids = ["umbriel", "wezterm", "luciole", "gtk3", "gtk4", "qt"]
+
+# ==============================================================================
+# 顶栏 —— 通栏全宽（复刻视频样式）
+#
+# 视频里是贴满左右边缘的通栏，中间依次是时钟/天气/窗口标题/媒体/频谱波形。
+# 此前为 macOS 悬浮岛（margin_ends=160 + radius=14），完整复刻则归零；
+# 想回岛：margin_ends=160、margin_edge=8、radius=14。
+# ==============================================================================
+[bar.main]
+position = "top"
+thickness = 34
+radius = 0
+margin_ends = 0
+margin_edge = 0
+padding = 12
+widget_spacing = 6
+capsule = false
+# 接近实心：面板要读成一个「面」，不是一团雾。
+background_opacity = 0.92
+compositor_blur = true
+shadow = true
+start = ["launcher", "wallpaper", "workspaces"]
+# 视频同款中段：时钟 + 天气 + 窗口标题 + 媒体 + 音频频谱
+# 注意 factory 注册名是下划线 active_window（文档页名是连字符，别照抄）
+center = ["clock", "weather", "active_window", "media", "audio-vis"]
+# 插件 bar widget 直接以完整类型串挂进列表（不走 [widget.*] 声明，
+# 声明式写法会被 config 解析器报 unrecognized——factory 只认类型串）
+end = ["tray", "network", "volume", "thepunkoff/pomodoro:widget", "battery", "control-center"]
+
+# 音频频谱 widget（PipeWire monitor 流），id 被 center 引用
+[widget.audio-vis]
+type = "audio_visualizer"
+width = 72
+bands = 20
+show_wave = true          # 平滑波形（视频样式）而非离散柱
+color_1 = "primary"
+color_2 = "secondary"
+
+# 番茄钟（视频里 5:00 Start/Reset 计时器的替代品：内建无 timer 类型，
+# 用社区插件补位）。bar widget 显示剩余时间，点击开面板。
+# 插件清单：声明式启用，等同 Settings → Plugins 的开关
+[plugins]
+enabled = ["thepunkoff/pomodoro"]
+
+# ==============================================================================
+# Dock —— 视频同款是「无 dock + 桌面小组件撑桌面」，故关闭。
+# macOS 式放大整套参数保留：回岛式审美只需 enabled = true 一行。
+# ==============================================================================
+[dock]
+enabled = false
+position = "bottom"
+icon_size = 44
+# 鼠标悬停放大
+magnification = true
+magnification_scale = 1.35
+active_scale = 1.0
+inactive_scale = 0.82
+radius = 16
+radius_top_left = 16
+radius_top_right = 16
+radius_bottom_left = 16
+radius_bottom_right = 16
+main_axis_padding = 10
+cross_axis_padding = 8
+item_spacing = 6
+margin_ends = 0
+# margin_edge = 0 时 dock 才真正贴边，圆角才会完整绘制；
+# 非 0 时 dock 是悬浮矩形（此时 concave 不生效）
+margin_edge = 0
+# 毛玻璃 Dock 面板（同样接近实心）
+background_opacity = 0.92
+compositor_blur = true
+shadow = true
+# 显示正在运行的应用（不像 lavalauncher 那样只能显示固定图标）
+show_running = true
+show_instance_count = false
+show_dots = false
+icon_saturation = 1.0
+
+# ==============================================================================
+# 浮层面板（启动器 / 剪贴板 / 控制中心 / 壁纸选择器）
+# ==============================================================================
+[shell.panel]
+transparency_mode = "glass"
+borders = false
+shadow = true
+launcher_placement = "floating"
+clipboard_placement = "floating"
+control_center_placement = "attached"
+
+[shell.shadow]
+direction = "down"
+alpha = 0.45
+
+[shell.animation]
+enabled = true
+speed = 1.15
+
+# ==============================================================================
+# 背景模糊（高斯模糊）
+#
+# backdrop 给「窗口背后」加重模糊 + 淡着色，
+# 这是 macOS 观感里最关键的一层，也是半透明能成立的前提。
+# ==============================================================================
+[backdrop]
+enabled = true
+blur_intensity = 0.55
+tint_intensity = 0.40
+
+# ==============================================================================
+# 壁纸
+# ==============================================================================
+[wallpaper]
+enabled = true
+fill_mode = "crop"
+transition = ["fade"]
+transition_duration = 800
+
+[wallpaper.default]
+path = "/usr/share/backgrounds/ordo/wallpaper-blackhole.png"
+
+# ==============================================================================
+# 桌面小组件（v5 招牌功能）—— 直接铺在壁纸上的 layer-shell（Bottom 层）
+#
+# 坐标是按 2560x1440 / Virtual-1 的第一版手排（对照视频构图），
+# box_* = 0 自动适配内容。精调流程（符合「config/ 是唯一事实来源」）：
+#   noctalia msg desktop-widgets-edit   # 空工作区拖/lasso/旋转
+#   Settings → Export Config → Merged User Config
+#   把导出的 [desktop_widgets] 回填覆盖本段
+# ==============================================================================
+[desktop_widgets]
+enabled = true
+schema_version = 2
+widget_order = ["sysmon_main", "clock_main", "media_main", "weather_main", "sticker_main"]
+
+[desktop_widgets.widget.sysmon_main]
+type = "sysmon"
+output = "Virtual-1"
+cx = 560.0
+cy = 500.0
+
+[desktop_widgets.widget.clock_main]
+type = "clock"
+output = "Virtual-1"
+cx = 420.0
+cy = 1050.0
+
+[desktop_widgets.widget.clock_main.settings]
+format = "{:%H:%M}"
+# 视频里的计时卡是轻玻璃不是实心黑块
+background_opacity = 0.6
+
+[desktop_widgets.widget.media_main]
+type = "media_player"
+output = "Virtual-1"
+cx = 1280.0
+cy = 620.0
+
+[desktop_widgets.widget.media_main.settings]
+# 空态直接隐藏：视频同款只在没有播放时露卡片
+hide_when_no_media = true
+
+[desktop_widgets.widget.weather_main]
+type = "weather"
+output = "Virtual-1"
+cx = 2050.0
+cy = 1060.0
+
+[desktop_widgets.widget.weather_main.settings]
+# 视频里天气是无卡片纯文字
+background = false
+
+# 粉色圆环装饰（视频桌面左侧的 sticker），素材由 gen-blackhole.py 生成。
+# 2026-11-22 挪位：原 (300,620) 与壁纸粉色小行星 (205,520) r70 视觉相触
+# （贴纸渲染外半径实测约 91px，挪位前与小行星间隙只剩个位数像素）。
+# 新坐标 (1650,1320) 在星环下缘右侧的空域：实机截图 + PIL 实测，
+# 对全部小行星、黑洞、星环带和四件 widget 卡片的净空 ≥ 230px，
+# 不压右下大行星弧，距屏幕底缘 29px 不出画。
+# 注意：GUI 拖拽会把它写进 ~/.local/state/noctalia/settings.toml 覆盖此处
+# （doctor 15.5 有一条专查这个），改坐标后 state 里的 cx/cy 也要同步。
+#
+# sysmon 卡片 (560,500)：2026-11-22 实测 (560,390) 时卡片右缘（半宽 105px）
+# 压住 gen-blackhole.py 的小行星 (700,360,r40) 左缘约 5px（全屏截图局部放大
+# 可见小行星左肩被卡片圆角遮挡；复核命令：pkill -x wezterm-gui 后 grim 全屏，
+# 裁 (180,120)-(780,520)）。左邻大行星 (330,260,r95) 实际净空 ~90px 并无重叠；
+# 故不取 (640,430)（那是往 (700,360) 撞），改为 cy +110 下移：与小行星
+# (700,360) 拉开 40px 垂直净空，与星环上缘（y≈650）仍留 90px。
+[desktop_widgets.widget.sticker_main]
+type = "sticker"
+output = "Virtual-1"
+cx = 1650.0
+cy = 1320.0
+
+[desktop_widgets.widget.sticker_main.settings]
+image_path = "/usr/share/backgrounds/ordo/deco-ring.png"
+opacity = 0.9
+background = false
+
+# ==============================================================================
+# 通知
+# ==============================================================================
+[notification]
+enable_daemon = true
+show_app_name = true
+show_actions = true
+group_by_app = true
+layer = "top"
+background_opacity = 0.94
+border = false
+
+# ==============================================================================
+# OSD（音量 / 亮度浮层）
+# ==============================================================================
+[osd]
+enabled = true
+position = "top_right"
+background_opacity = 0.92
+border = false
+hide_delay_ms = 1400
+
+# ==============================================================================
+# 锁屏
+# ==============================================================================
+[lockscreen]
+enabled = true
+# 用桌面快照作锁屏背景（需要 wlr-screencopy）
+blurred_desktop = true
+blur_intensity = 0.8
+tint_intensity = 0.35
+tint_color = "surface"
+transition = ["fade"]
+transition_duration = 600
+
+# ==============================================================================
+# 位置与天气 —— IP 自动定位（走 noctalia.dev，不需要 geoclue）
+#
+# 桌面 weather widget 与顶栏 weather 都依赖这里的坐标。
+# auto_locate 用 VM 出口 IP 解析近似坐标：不想上报 IP 就换成
+# address = "城市名"（geocoded）或手动 latitude/longitude。
+# ==============================================================================
+[location]
+auto_locate = true
+
+[weather]
+enabled = true
+refresh_minutes = 30
+unit = "metric"
+effects = true
+
+# ==============================================================================
+# 控制中心与系统
+# ==============================================================================
+[control_center]
+show_avatar_border = false
+
+[system.monitor]
+enabled = true
+
+[shell]
+telemetry_enabled = false
+settings_show_advanced = true
+clipboard_enabled = true
+clipboard_history_max_entries = 100

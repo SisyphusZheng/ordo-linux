@@ -1,0 +1,615 @@
+#!/bin/sh
+# ordo-snap — ZFS 快照管理（list / create / delete / rollback / auto）
+#
+# 用法：
+#   ordo snap list                    列出当前系统的快照（按类型分组）
+#   ordo snap create [名字]            创建快照（默认 manual-<时间戳>）
+#   ordo snap delete <名字>            删除快照
+#   ordo snap rollback <名字>          回滚：clone+promote+切 bootfs，重启后生效
+#   ordo snap auto on|off|status      定时快照开关 / 状态
+#   ordo snap identity                显示当前运行的数据集 vs 规范名
+#
+# 快照分类：
+#   @auto-*        定时快照，轮转保留
+#   @manual-*      手工快照，不自动删除
+#   @pre-update-*  升级前快照，不自动删除
+#
+# 操作对象为 RUNNING_ROOT（实际挂载于 / 的数据集），不是 DATASET。
+# 回滚后系统运行在 clone 上，DATASET 指向的是未运行的旧系统。
+#
+# 回滚：根数据集挂载时 rollback 受 clone 依赖阻止，故走
+# clone → promote → 切 bootfs → 重启。promote 后原数据集才可清理。
+
+set -eu
+
+# 定位脚本真实目录（兼容 /usr/local/bin/xxx → /opt/ordo/scripts/xxx 的符号链接）
+# readlink -f 一次解到底；旧写法只在 $0 本身是软链时才解，
+# 多级软链（bin → /opt/ordo → 实际目录）会停在中间那层。
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_here=$(cd "$(dirname "$_self")" && pwd)
+
+# 依次找 lib.sh / ordo-i18n.sh（仓库内、/opt/ordo/scripts、/usr/local/lib/ordo）
+for _d in "$_here" /opt/ordo/scripts /usr/local/lib/ordo; do
+    [ -r "$_d/lib.sh" ] && . "$_d/lib.sh" && break
+done
+for _d in "$_here" /opt/ordo/scripts /usr/local/lib/ordo; do
+    [ -r "$_d/ordo-i18n.sh" ] && . "$_d/ordo-i18n.sh" && break
+done
+
+# lib.sh 缺失是硬错误（后面全靠它）
+command -v msg >/dev/null 2>&1 || {
+    echo "!! 找不到 lib.sh（应位于脚本目录、/opt/ordo/scripts 或 /usr/local/lib/ordo）" >&2
+    echo "   Cannot locate lib.sh (looked in script dir, /opt/ordo/scripts, /usr/local/lib/ordo)" >&2
+    exit 1
+}
+
+PROG="ordo snap"
+ACTION="${1:-list}"
+shift 2>/dev/null || true
+
+# 操作对象：永远用实际运行的根
+SNAP_TARGET="$RUNNING_ROOT"
+
+# 用户数据数据集：与系统分开快照。
+# 【为什么也要打快照】ADR 0002 原本规定"不回滚 /home"，理由是回滚系统时
+# 不该丢用户新文件——这个理由在"系统升级失败"场景成立，但在"AI/脚本改坏
+# 项目文件"场景下是致命缺口。ZFS 允许对 /home 单独快照、并可**按文件**
+# 从 .zfs/snapshot 恢复，不必整体回滚。所以：/home 独立快照，保留下述策略。
+HOME_SNAP_TARGET="${HOME_DATASET:-rpool/home}"
+
+# require_root 来自 lib.sh（会打印用户实际该敲的命令）
+# 【旧 bug】这里曾各自定义一份，引用 "$*" 但调用处从不传参 ——
+# 实测提示是「需要 root：doas ordo backup send send /mnt/usb」（send 重复），
+# 或者干脆把命令截空。
+
+snap_prefix() { echo "${1#*@}"; }
+snap_time() { zfs get -H -o value creation "$SNAP_TARGET@$1" 2>/dev/null; }
+snap_used() { zfs get -H -o value used "$SNAP_TARGET@$1" 2>/dev/null; }
+
+show_identity() {
+    msg "运行中的根数据集：$RUNNING_ROOT" "Running root dataset: $RUNNING_ROOT"
+    msg "配置里的规范名：  $DATASET"     "Canonical name:       $DATASET"
+    if is_rolled_back_env; then
+        msg "状态：已回滚（运行在 clone 上）" "State: rolled back (running on a clone)"
+        msg ""
+        msg "规范化的方法（可选）：" "To normalize (optional):"
+        msg "  doas zfs promote $RUNNING_ROOT" "  doas zfs promote $RUNNING_ROOT"
+        msg "  doas zfs rename $DATASET ${DATASET}-old" "  doas zfs rename $DATASET ${DATASET}-old"
+        msg "  doas zfs rename $RUNNING_ROOT $DATASET" "  doas zfs rename $RUNNING_ROOT $DATASET"
+        msg "  doas zpool set bootfs=$DATASET $POOL" "  doas zpool set bootfs=$DATASET $POOL"
+        msg "  doas zfs destroy -r ${DATASET}-old" "  doas zfs destroy -r ${DATASET}-old"
+    else
+        msg "状态：正常（运行在规范数据集上）" "State: normal"
+    fi
+}
+
+list_snapshots() {
+    warn_if_identity_drift
+
+    _all=$(zfs list -H -t snapshot -o name -s creation -r "$SNAP_TARGET" 2>/dev/null \
+           | sed "s|^$SNAP_TARGET@||" || true)
+
+    if [ -z "$_all" ]; then
+        msg "（无快照）" "(no snapshots)"
+        return 0
+    fi
+
+    msg "快照列表（${SNAP_TARGET}）：" "Snapshots for $SNAP_TARGET:"
+    printf '\n'
+
+    for _type in pre-update auto manual; do
+        _matched=$(printf '%s\n' "$_all" | grep "^${_type}-" || true)
+        [ -z "$_matched" ] && continue
+
+        case "$_type" in
+            pre-update) msg "  [升级前]" "  [pre-update]" ;;
+            auto)       msg "  [定时]"   "  [auto]" ;;
+            manual)     msg "  [手工]"   "  [manual]" ;;
+        esac
+
+        printf '%s\n' "$_matched" | while IFS= read -r _s; do
+            [ -z "$_s" ] && continue
+            printf '    %-42s %8s  %s\n' "$_s" "$(snap_used "$_s")" "$(snap_time "$_s")"
+        done
+        printf '\n'
+    done
+
+    _other=$(printf '%s\n' "$_all" | grep -vE '^(pre-update|auto|manual)' || true)
+    if [ -n "$_other" ]; then
+        msg "  [其他]" "  [other]"
+        printf '%s\n' "$_other" | while IFS= read -r _s; do
+            [ -z "$_s" ] && continue
+            printf '    %-42s %8s  %s\n' "$_s" "$(snap_used "$_s")" "$(snap_time "$_s")"
+        done
+    fi
+
+    # 空间水位提示（快照多了会吃满）
+    _total=$(zfs get -H -o value usedbysnapshots "$SNAP_TARGET" 2>/dev/null || echo 0)
+    _avail=$(zfs get -H -o value available "$POOL" 2>/dev/null || echo 0)
+    msg "快照占用：${_total}（池可用：${_avail}）" "Snapshot usage: $_total (pool available: $_avail)"
+
+    # /home 快照（用户数据独立快照，AI 改坏项目时按文件恢复用）
+    if zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        _home_all=$(zfs list -H -t snapshot -o name -s creation "$HOME_SNAP_TARGET" 2>/dev/null \
+                    | sed "s|^$HOME_SNAP_TARGET@||" || true)
+        printf '\n'
+        if [ -z "$_home_all" ]; then
+            msg "用户数据快照（$HOME_SNAP_TARGET）：（无）" \
+                "Home snapshots ($HOME_SNAP_TARGET): (none)"
+            msg "  提示：doas ordo snap create 或 ordo snap auto on" \
+                "  Hint: doas ordo snap create, or ordo snap auto on"
+        else
+            msg "用户数据快照（$HOME_SNAP_TARGET）：" "Home snapshots ($HOME_SNAP_TARGET):"
+            printf '%s\n' "$_home_all" | tail -10 | while IFS= read -r _hs; do
+                [ -z "$_hs" ] && continue
+                printf '    %-42s %8s  %s\n' "$_hs" \
+                    "$(zfs get -H -o value used "$HOME_SNAP_TARGET@$_hs" 2>/dev/null)" \
+                    "$(zfs get -H -o value creation "$HOME_SNAP_TARGET@$_hs" 2>/dev/null)"
+            done
+            _hn=$(printf '%s\n' "$_home_all" | grep -c . || true)
+            [ -n "$_hn" ] || _hn=0
+            [ "$_hn" -gt 10 ] && msg "  …（共 $_hn 个，只显示最近 10 个）" \
+                                     "  ... ($_hn total, showing latest 10)"
+        fi
+    fi
+}
+
+create_snapshot() {
+    require_root "$PROG $*"
+    warn_if_identity_drift
+
+    _name="${1:-manual-$(date +%Y%m%d-%H%M%S)}"
+    case "$_name" in
+        auto-*|manual-*|pre-update-*) ;;
+        *) _name="manual-$_name" ;;
+    esac
+
+    # ZFS 快照名只允许 ASCII 字母数字和 . _ - :
+    if ! printf '%s' "$_name" | grep -qE '^[A-Za-z0-9._:-]+$'; then
+        err "快照名只能用 ASCII 字母/数字/._:-（ZFS 限制）" \
+            "Snapshot name must be ASCII alnum/._:- only (ZFS limitation)"
+        err "  收到：$_name" "  got: $_name"
+        exit 1
+    fi
+
+    if zfs list -H -t snapshot -o name "$SNAP_TARGET@$_name" >/dev/null 2>&1; then
+        err "快照已存在：$_name" "Snapshot already exists: $_name"
+        exit 1
+    fi
+
+    msg "创建快照 $_name ..." "Creating snapshot $_name ..."
+    zfs snapshot "$SNAP_TARGET@$_name" || {
+        err "创建失败" "Create failed"
+        exit 1
+    }
+    msg "完成：$SNAP_TARGET@$_name" "Done: $SNAP_TARGET@$_name"
+    printf '  used: %s\n' "$(snap_used "$_name")"
+
+    # 同步给 /home 打同名快照（用户数据独立快照，见文件头说明）。
+    # 失败不连坐：系统快照已成功，/home 失败只警告。
+    if zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        if zfs list -H -t snapshot -o name "$HOME_SNAP_TARGET@$_name" >/dev/null 2>&1; then
+            msg "  /home 快照已存在，跳过" "  /home snapshot exists, skip"
+        elif zfs snapshot "$HOME_SNAP_TARGET@$_name" 2>/dev/null; then
+            msg "  已同步创建 $HOME_SNAP_TARGET@$_name" \
+                "  Also created $HOME_SNAP_TARGET@$_name"
+        else
+            msg "  ! /home 快照创建失败（系统快照已成功）" \
+                "  ! /home snapshot failed (system snapshot OK)"
+        fi
+    fi
+}
+
+delete_snapshot() {
+    require_root "$PROG $*"
+    [ -n "${1:-}" ] || { err "需要快照名" "Snapshot name required"; exit 1; }
+    _name=$(snap_prefix "$1")
+
+    zfs list -H -t snapshot -o name "$SNAP_TARGET@$_name" >/dev/null 2>&1 || {
+        err "快照不存在：$_name" "Snapshot not found: $_name"
+        exit 1
+    }
+
+    msg "将删除：$SNAP_TARGET@${_name}（$(snap_used "$_name")）" \
+        "Will delete: $SNAP_TARGET@$_name ($(snap_used "$_name"))"
+    msg_n "确认？[y/N] " "Confirm? [y/N] "
+    read -r _ans
+    [ "$_ans" = "y" ] || { msg "已取消" "Cancelled"; exit 1; }
+
+    # 有依赖时给明确指引，而不是干巴巴的报错。
+    # 三种阻塞形态必须分开说，否则用户照着错的那条去处理：
+    #   clones   —— 有 clone 数据集（回滚产物），要先 promote / 销毁
+    #   userrefs —— 有 hold（sysup 升级中会 hold），要先 zfs release
+    #   其他     —— 真正的删除失败（权限/忙/IO）
+    if ! zfs destroy "$SNAP_TARGET@$_name" 2>/dev/null; then
+        _clones=$(zfs get -H -o value clones "$SNAP_TARGET@$_name" 2>/dev/null || true)
+        _holds=$(zfs gets -H -o value -p userrefs "$SNAP_TARGET@$_name" 2>/dev/null || printf '0')
+        if [ -n "$_clones" ] && [ "$_clones" != "-" ]; then
+            err "该快照有 clone 依赖，无法删除：" "Snapshot has clones, cannot destroy:"
+            printf '  %s\n' "$_clones" >&2
+            err "先 promote 或销毁这些 clone" "Promote or destroy those clones first"
+        elif [ "${_holds:-0}" != "0" ]; then
+            err "该快照被 hold 持有（共 ${_holds} 个），无法删除" \
+                "Snapshot is held (${_holds} holds), cannot destroy"
+            zfs holds "$SNAP_TARGET@$_name" 2>/dev/null | sed 's/^/    /' >&2 || true
+            err "先释放：zfs release <tag> $SNAP_TARGET@$_name" \
+                "Release first: zfs release <tag> $SNAP_TARGET@$_name"
+        else
+            err "删除失败（非 clone/hold 原因，检查权限或 IO）" \
+                "Delete failed (not clone/hold; check permissions or IO)"
+        fi
+        exit 1
+    fi
+    msg "已删除" "Deleted"
+
+    # 同步删除 /home 的同名快照（若存在）。同样不连坐。
+    if zfs list -H -t snapshot -o name "$HOME_SNAP_TARGET@$_name" >/dev/null 2>&1; then
+        if zfs destroy "$HOME_SNAP_TARGET@$_name" 2>/dev/null; then
+            msg "  已同步删除 $HOME_SNAP_TARGET@$_name" \
+                "  Also deleted $HOME_SNAP_TARGET@$_name"
+        else
+            msg "  ! /home 同名快照删除失败（系统快照已删）" \
+                "  ! /home snapshot delete failed (system one deleted)"
+        fi
+    fi
+}
+
+rollback_snapshot() {
+    require_root "$PROG $*"
+    [ -n "${1:-}" ] || {
+        msg "用法：$PROG rollback <快照名>" "Usage: $PROG rollback <snapshot>"
+        msg "先运行 '$PROG list' 查看可用快照" "Run '$PROG list' first"
+        exit 1
+    }
+    _name=$(snap_prefix "$1")
+
+    zfs list -H -t snapshot -o name "$SNAP_TARGET@$_name" >/dev/null 2>&1 || {
+        err "快照不存在：$_name" "Snapshot not found: $_name"
+        exit 1
+    }
+
+    warn_if_identity_drift
+    _running=$(detect_running_root)
+    [ -n "$_running" ] && [ "$_running" = "$SNAP_TARGET" ] || {
+        err "无法确认当前 ZFS 根数据集" "Cannot confirm the running ZFS root"
+        exit "$ORDO_EXIT_UNKNOWN"
+    }
+    _pool=${_running%%/*}
+    _previous_root=$(zpool get -H -o value bootfs "$_pool") || exit "$ORDO_EXIT_UNKNOWN"
+    _rb="${_running%-rb-*}-rb-$(date +%Y%m%d-%H%M%S)"
+
+    _m2=0
+    if ordo_m2_boot; then
+        _m2=1
+        # shellcheck source=config/platform/m2/boot-sync.sh
+        . "$ORDO_ROOT/config/platform/m2/boot-sync.sh"
+    fi
+
+    msg "回滚方式：clone → 校验引导 → 切换启动目标 → promote → 重启" \
+        "Method: clone, validate boot files, switch boot target, promote and reboot"
+    printf '\n'
+    msg "  源快照：  $SNAP_TARGET@$_name" "  source:  $SNAP_TARGET@$_name"
+    msg "  新数据集：$_rb"               "  target:  $_rb"
+    msg "  当前 bootfs：$_previous_root" "  current bootfs: $_previous_root"
+    printf '\n'
+    msg "注意：promote 会反转 clone 依赖，使旧数据集可被清理。" \
+        "Note: promote reverses the clone dependency so the old dataset can be destroyed."
+    printf '\n'
+
+    msg_n "确认？[y/N] " "Confirm? [y/N] "
+    read -r _ans
+    [ "$_ans" = "y" ] || { msg "已取消" "Cancelled"; exit 1; }
+
+    if [ "$_m2" -eq 1 ]; then
+        trap 'exit "$ORDO_EXIT_BAD"' INT TERM HUP
+        m2_boot_open "$_pool" || exit "$?"
+        _previous_root=$(zpool get -H -o value bootfs "$_pool") || exit "$ORDO_EXIT_UNKNOWN"
+    fi
+
+    msg "克隆快照..." "Cloning snapshot ..."
+    zfs clone -o mountpoint=legacy -o org.zfsbootmenu:active=on "$SNAP_TARGET@$_name" "$_rb" || {
+        err "克隆失败" "Clone failed"
+        exit 1
+    }
+
+    msg "切换启动目标 → $_rb" "Switching boot target -> $_rb"
+    if [ "$_m2" -eq 1 ]; then
+        m2_boot_mount_be "$_rb" || ordo_die "无法挂载回滚克隆 $_rb"
+        m2_boot_select "$M2_BOOT_WORK/be" || exit "$?"
+        _m2_zfs=$(modinfo -b "$M2_BOOT_WORK/be" -k "$M2_RELEASE" -F version zfs) || exit "$ORDO_EXIT_UNKNOWN"
+        if [ -z "$_m2_zfs" ] || ! m2_boot_check_initrd "$M2_INITRD" "$_m2_zfs"; then
+            ordo_die "回滚克隆 $_rb 缺少匹配的 Asahi USB/ZFS 启动产物"
+        fi
+        m2_boot_publish --bootfs "$_pool" "$_previous_root" "$_rb" || \
+            ordo_die "切换 M2 启动目标失败，已保留克隆 $_rb"
+        m2_boot_unmount_be || ordo_die "无法卸载回滚克隆 $_rb"
+    elif ! zpool set bootfs="$_rb" "$_pool"; then
+        err "切换失败（已保留克隆 ${_rb}，可手动处理）" \
+            "Switch failed (clone $_rb kept, handle manually)"
+        exit 1
+    fi
+
+    msg "promote（反转 clone 依赖）..." "Promoting (reversing clone dependency) ..."
+    if zfs promote "$_rb"; then
+        msg "  promote 成功" "  promote ok"
+    else
+        msg "  promote 失败（克隆可启动；清理旧数据集前须重试 promote）" \
+            "  promote failed (clone is bootable; retry promote before destroying the old dataset)"
+    fi
+
+    printf '\n'
+    msg "回滚准备完成。请重启：" "Rollback prepared. Please reboot:"
+    msg "  reboot" "  reboot"
+    printf '\n'
+    msg "重启将进入 ${_rb}。" "After reboot you will boot $_rb."
+    # 【bug 修复】旧版同时给出 destroy 与 rename 两条指令，而它们作用于
+    # **同一个对象**、互斥：先 destroy 就没有东西可 rename，先 rename 就
+    # 找不到原名。用户照抄必然撞上 "dataset does not exist"。
+    # 这里改成「二选一」的两条路径，各自完整。
+    printf '\n'
+    msg "路径 A（推荐）：把回滚后的环境规范化回原名" \
+        "Path A (recommended): normalize the rolled-back env back to the canonical name"
+    msg "  doas zfs rename $SNAP_TARGET ${DATASET}-old" \
+        "  doas zfs rename $SNAP_TARGET ${DATASET}-old"
+    msg "  doas zfs rename $_rb $DATASET" \
+        "  doas zfs rename $_rb $DATASET"
+    msg "  doas zpool set bootfs=$DATASET $_pool" \
+        "  doas zpool set bootfs=$DATASET $_pool"
+    printf '\n'
+    msg "路径 B：接受临时名，仅清理旧环境" \
+        "Path B: keep the temporary name, just clean up the old env"
+    msg "  doas zfs destroy -r $SNAP_TARGET" \
+        "  doas zfs destroy -r $SNAP_TARGET"
+    msg "  （注意：选了 B 之后，${DATASET} 这个名字仍然不存在，doctor 会提示身份漂移）" \
+        "  (note: after B, ${DATASET} still does not exist; doctor will flag identity drift)"
+}
+
+auto_control() {
+    _sub="${1:-status}"
+    _cronfile="/etc/cron.d/ordo-snapshot"
+
+    case "$_sub" in
+        on)
+            require_root "$PROG $*"
+            if ! command -v crond >/dev/null 2>&1 && ! command -v cron >/dev/null 2>&1; then
+                err "未安装 cron 守护进程" "No cron daemon found"
+                err "  doas emerge sys-process/cronie" "  doas emerge sys-process/cronie"
+                err "  doas rc-update add cronie default" "  doas rc-update add cronie default"
+                exit 1
+            fi
+            # 二进制在 ≠ 服务会跑。旧版只查二进制，于是"写了 cron 却永不执行"
+            # 也能返回成功。这里补查 runlevel，并顺手注册（幂等）。
+            if command -v rc-update >/dev/null 2>&1; then
+                if ! rc-update show default 2>/dev/null | grep -q '^[[:space:]]*cronie'; then
+                    if rc-update add cronie default >/dev/null 2>&1; then
+                        msg "  已把 cronie 加入 default runlevel" \
+                            "  Added cronie to the default runlevel"
+                    else
+                        err "cronie 未在 default runlevel，且注册失败 —— 定时快照不会执行" \
+                            "cronie not in default runlevel and could not be added"
+                        exit 1
+                    fi
+                fi
+            else
+                err "找不到 rc-update，无法确认 cronie 是否随开机启动" \
+                    "rc-update not found; cannot confirm cronie starts at boot"
+                exit 1
+            fi
+            mkdir -p /etc/cron.d
+            # 与 install.sh §16 生成的 cron 保持一字不差：
+            # 缺 SHELL/PATH 时 cron 用极简环境，脚本里的 zfs 可能不在 PATH 上。
+            cat > "$_cronfile" << 'CRON'
+# ordo 定时快照：每小时一次，分档保留（24 小时 / 7 天 / 4 周）
+# 由 ordo-snap-auto 执行，对象是 RUNNING_ROOT（回滚后也对）
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin
+17 * * * * root /usr/local/bin/ordo-snap-auto >/dev/null 2>&1
+CRON
+            chmod 644 "$_cronfile"
+            msg "定时快照已启用（每小时，保留 24 小时 / 7 天 / 4 周 三档）" \
+                "Auto snapshot enabled (hourly; keeps 24h / 7d / 4w tiers)"
+            ;;
+        off)
+            require_root "$PROG $*"
+            rm -f "$_cronfile"
+            msg "定时快照已关闭" "Auto snapshot disabled"
+            ;;
+        status)
+            # 三项都检查，缺一即为未真正生效
+            _ok=1
+            [ -f "$_cronfile" ] || _ok=0
+            command -v ordo-snap-auto >/dev/null 2>&1 || [ -x /usr/local/bin/ordo-snap-auto ] || _ok=0
+            if command -v rc-service >/dev/null 2>&1; then
+                rc-service cronie status 2>/dev/null | grep -q started || _ok=0
+            fi
+
+            if [ "$_ok" = "1" ]; then
+                msg "定时快照：已启用且运行中" "Auto snapshot: enabled and running"
+            else
+                msg "定时快照：未完整启用" "Auto snapshot: not fully enabled"
+                [ -f "$_cronfile" ] || msg "  ✗ cron 文件缺失" "  ✗ cron file missing"
+                { [ -x /usr/local/bin/ordo-snap-auto ] || command -v ordo-snap-auto >/dev/null 2>&1; } \
+                    || msg "  ✗ ordo-snap-auto 未安装" "  ✗ ordo-snap-auto not installed"
+                if command -v rc-service >/dev/null 2>&1; then
+                    rc-service cronie status 2>/dev/null | grep -q started \
+                        || msg "  ✗ cronie 服务未运行" "  ✗ cronie service not running"
+                fi
+                msg "  启用：doas $PROG auto on" "  enable: doas $PROG auto on"
+            fi
+
+            _cnt=$(zfs list -H -t snapshot -o name -r "$SNAP_TARGET" 2>/dev/null \
+                   | grep -c '@auto-' || true)
+            msg "  当前 auto 快照数：${_cnt}（目标 ${SNAP_TARGET}）" \
+                "  current auto snapshots: $_cnt (target $SNAP_TARGET)"
+
+            _last=$(zfs list -H -t snapshot -o name,creation -s creation -r "$SNAP_TARGET" 2>/dev/null \
+                    | grep '@auto-' | tail -1 | awk '{print $2, $3, $4, $5}')
+            if [ -n "$_last" ]; then
+                msg "  最近一次：$_last" "  latest: $_last"
+            fi
+            ;;
+        *)
+            err "未知参数：${_sub}（on|off|status）" "Unknown: $_sub (on|off|status)"
+            exit 1
+            ;;
+    esac
+}
+
+# restore — 从快照恢复单个文件/目录（不整体回滚）
+#
+# 这是「AI/脚本改坏了项目文件」场景的正解：ZFS 的 .zfs/snapshot 是只读
+# 挂载视图，直接从那里 cp 回来即可，不影响系统其他部分，也不需要重启。
+#
+# 用法：
+#   ordo snap restore <快照名> <绝对路径>
+#   ordo snap restore auto-hourly-20261120-010700 /home/ordo/项目/foo.ts
+#   ordo snap restore auto-hourly-20261120-010700 /home/ordo/项目   （整个目录）
+restore_from_snapshot() {
+    require_root "$PROG $*"
+    _snap_name=$(snap_prefix "${1:-}")
+    _path="${2:-}"
+
+    [ -n "$_snap_name" ] || {
+        err "用法：$PROG restore <快照名> <绝对路径>" \
+            "Usage: $PROG restore <snapshot> <absolute-path>"
+        exit 1
+    }
+    [ -n "$_path" ] || {
+        err "需要目标路径（绝对路径）" "Target path (absolute) required"
+        exit 1
+    }
+    case "$_path" in
+        /*) ;;
+        *)  err "路径必须是绝对路径：$_path" "Path must be absolute: $_path"; exit 1 ;;
+    esac
+
+    # 判定该路径属于哪个数据集（系统根 or /home），据此选快照源与挂载点。
+    #
+    # 【关键】必须用 findmnt 拿该数据集的**真实挂载点**，不能在 / 和 /home
+    # 之间瞎猜——两者可能都有 .zfs/snapshot 目录（不同数据集的视图），
+    # 猜错就会拼出 //.zfs/.../ordo/xxx 这种丢失中间层的路径（实测踩过）。
+    _owner=""
+    case "$_path" in
+        /home/*)
+            _owner="$HOME_SNAP_TARGET"
+            ;;
+        *)
+            _owner="$SNAP_TARGET"
+            ;;
+    esac
+
+    # 快照必须存在
+    zfs list -H -t snapshot -o name "$_owner@$_snap_name" >/dev/null 2>&1 || {
+        err "快照不存在：$_owner@$_snap_name" "Snapshot not found: $_owner@$_snap_name"
+        err "  用 '$PROG list' 查看可用快照" \
+            "  Use '$PROG list' to see available snapshots"
+        exit 1
+    }
+
+    # 该数据集的真实挂载点（legacy 数据集由 fstab 挂载，findmnt 能给出）
+    _mnt=$(findmnt -no TARGET "$_owner" 2>/dev/null || true)
+    [ -n "$_mnt" ] || {
+        err "找不到数据集 $_owner 的挂载点" "Cannot find mountpoint for $_owner"
+        exit 1
+    }
+    # 去掉末尾斜杠（根是 "/"，其他如 /home）
+    case "$_mnt" in
+        /) ;;
+        */) _mnt="${_mnt%/}" ;;
+    esac
+
+    _zp="$_mnt/.zfs/snapshot/$_snap_name"
+    [ -d "$_zp" ] || {
+        err "找不到快照可读视图：$_zp" "Snapshot view not found: $_zp"
+        err "  检查：zfs get snapdir $_owner（应为 hidden 或 visible）" \
+            "  Check: zfs get snapdir $_owner (should be hidden or visible)"
+        exit 1
+    }
+
+    # 目标路径相对挂载点的部分：
+    #   _mnt=/      + /home/ordo/x  → /home/ordo/x
+    #   _mnt=/home  + /home/ordo/x  → /ordo/x
+    if [ "$_mnt" = "/" ]; then
+        _rel="$_path"
+    else
+        _rel="${_path#"$_mnt"}"
+        # 保证以 / 开头
+        case "$_rel" in
+            /*) ;;
+            *) _rel="/$_rel" ;;
+        esac
+    fi
+    _src="$_zp$_rel"
+
+    [ -e "$_src" ] || {
+        err "快照里没有该路径：$_src" "Path not in snapshot: $_src"
+        exit 1
+    }
+
+    # 恢复：文件直接 cp；目录用 cp -a（不删目标里多出来的东西）
+    msg "从快照恢复" "Restoring from snapshot"
+    printf '  快照: %s\n' "$_owner@$_snap_name"
+    printf '  源:   %s\n' "$_src"
+    printf '  目标: %s\n' "$_path"
+
+    if [ -d "$_src" ]; then
+        # 目录：逐项覆盖/新增，不删除目标现有其他文件（保守）
+        cp -a "$_src/." "$_path/" 2>/dev/null || {
+            # 目标目录可能不存在
+            mkdir -p "$_path" && cp -a "$_src/." "$_path/" || {
+                err "恢复失败" "Restore failed"; exit 1
+            }
+        }
+        msg "✔ 目录已恢复（未删除目标中额外文件）" \
+            "✔ Directory restored (extra files in target kept)"
+    else
+        _dir=$(dirname "$_path")
+        [ -d "$_dir" ] || mkdir -p "$_dir"
+        # 已存在则先备份为 .ordo-restore-bak，避免误覆盖无法挽回
+        if [ -e "$_path" ]; then
+            _bak="${_path}.ordo-restore-bak-$(date +%Y%m%d-%H%M%S)"
+            cp -a "$_path" "$_bak" && \
+                msg "  原文件已备份：$_bak" "  Original backed up: $_bak"
+        fi
+        cp -a "$_src" "$_path" || { err "恢复失败" "Restore failed"; exit 1; }
+        msg "✔ 文件已恢复：$_path" "✔ File restored: $_path"
+    fi
+}
+
+case "$ACTION" in
+    list|ls)     list_snapshots ;;
+    create|snap) create_snapshot "$@" ;;
+    delete|rm)   delete_snapshot "$@" ;;
+    rollback|rb) rollback_snapshot "$@" ;;
+    restore)     restore_from_snapshot "$@" ;;
+    auto)        auto_control "$@" ;;
+    identity|id) show_identity ;;
+    -h|--help|help)
+        cat <<EOF
+$PROG — ZFS 快照管理
+
+用法: $PROG <动作> [参数]
+
+动作:
+  list                    列出当前系统的快照（按类型分组，含 /home）
+  create [名字]            创建快照（默认 manual-<时间戳>；同时给 /home 打同名快照）
+  delete <名字>            删除快照（需确认，有 clone 依赖会提示；同名 /home 快照一并删）
+  rollback <名字>          回滚：clone → promote → 切 bootfs，重启后生效
+  restore <快照> <路径>     从快照恢复单个文件/目录（不整体回滚，最常用）
+  auto on|off|status      定时快照开关 / 状态（检查 cron + 服务 + 工具三项）
+  identity                显示「运行中的数据集」vs「配置里的规范名」
+
+示例:
+  $PROG identity
+  $PROG list
+  $PROG create before-kernel-update
+  $PROG rollback pre-update-20261117-175650
+  $PROG auto on
+EOF
+        ;;
+    *)
+        err "未知动作：$ACTION" "Unknown action: $ACTION"
+        msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
+        exit 1
+        ;;
+esac

@@ -1,0 +1,155 @@
+#!/bin/sh
+# ordo-snap-auto — cron 调用的定时快照（分档保留）
+#
+# 由 /etc/cron.d/ordo-snapshot 每小时调用一次。
+# 手动测试：doas /usr/local/bin/ordo-snap-auto
+#
+# 【保留策略】分档（借鉴 zfs-auto-snapshot / Sanoid 的做法）
+#   hourly  由本脚本每小时创建，保留 24 个（1 天）
+#   daily   由本脚本在 03:xx 创建，保留 7 个（1 周）
+#   weekly  由本脚本在周一的 04:xx 创建，保留 4 个（1 月）
+#   命名统一为 auto-<档位>-<时间戳>，便于分类轮转。
+#   pre-update-* 与 manual-* 永不由本脚本删除。
+#
+# 【关键】操作对象是**当前实际挂载的根数据集**，不是 config/dataset 里的规范名。
+# 回滚后系统可能运行在 rpool/root/ordo-rb-* 上，此时必须给那个打快照。
+
+set -eu
+
+# 按脚本自身位置找 lib.sh（解软链），而不是硬编码 /opt/ordo —— 
+# 硬编码会让「仓库内直接跑」和「装到别处」两种情形行为不同。
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_here="$(dirname "$_self")"
+for _d in "$_here" /opt/ordo/scripts /usr/local/lib/ordo; do
+    if [ -r "$_d/lib.sh" ]; then
+        . "$_d/lib.sh"
+        _lib_loaded=1
+        break
+    fi
+done
+if [ "${_lib_loaded:-0}" != "1" ]; then
+    # 极简兜底：cron 环境下也必须能确定快照对象
+    . /etc/ordo/dataset 2>/dev/null || {
+        POOL="rpool"; DATASET="rpool/root/ordo"; HOME_DATASET="rpool/home"
+    }
+    RUNNING_ROOT="$(findmnt -no SOURCE / 2>/dev/null || printf '%s' "$DATASET")"
+fi
+
+TARGET="$RUNNING_ROOT"
+# 用户数据数据集：与系统分开快照（AI/脚本改坏项目文件时可按文件恢复）
+HOME_SNAP_TARGET="${HOME_DATASET:-rpool/home}"
+LOG_TAG="ordo-snap-auto"
+
+# 保留数量
+KEEP_HOURLY=24
+KEEP_DAILY=7
+KEEP_WEEKLY=4
+
+log() { logger -t "$LOG_TAG" "$*" 2>/dev/null || echo "$*"; }
+
+# 数据集不存在就退出
+zfs list -H -o name "$TARGET" >/dev/null 2>&1 || {
+    log "dataset $TARGET not found, abort"
+    exit 1
+}
+
+# 池健康检查：非 ONLINE/DEGRADED 时不打快照（zfs-auto-snapshot 的做法）
+_health=$(zpool list -H -o health "$POOL" 2>/dev/null || echo UNKNOWN)
+case "$_health" in
+    ONLINE|DEGRADED) ;;
+    *)
+        log "pool $POOL health=$_health, skipping snapshot"
+        exit 0
+        ;;
+esac
+
+# 空间保护：查 ZFS 的 available 而不是 df（ZFS 上 df 不可靠）
+_avail=$(zfs get -H -o value available "$POOL" 2>/dev/null | awk '{print $1}')
+_avail_bytes=$(numfmt --from=iec "${_avail:-0}" 2>/dev/null || echo 0)
+if [ "${_avail_bytes:-0}" -lt 2147483648 ]; then
+    log "low pool space (${_avail}), skipping snapshot"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# 决定本次要打哪个档位（每小时跑一次，按时间判断）
+# ---------------------------------------------------------------------------
+_now_hour=$(date +%-H)
+_now_min=$(date +%-M)
+_now_dow=$(date +%u)     # 1=周一 ... 7=周日
+
+_tiers="hourly"
+# 每天 03:xx 额外打一个 daily
+if [ "$_now_hour" -eq 3 ]; then
+    _tiers="$_tiers daily"
+fi
+# 每周一 04:xx 额外打一个 weekly
+if [ "$_now_hour" -eq 4 ] && [ "$_now_dow" -eq 1 ]; then
+    _tiers="$_tiers weekly"
+fi
+
+# ---------------------------------------------------------------------------
+# 创建快照 + 分档轮转
+# ---------------------------------------------------------------------------
+for _tier in $_tiers; do
+    _name="auto-${_tier}-$(date +%Y%m%d-%H%M%S)"
+    if zfs snapshot "$TARGET@$_name" 2>/dev/null; then
+        log "created $TARGET@$_name"
+    else
+        log "failed to create $TARGET@$_name"
+        continue
+    fi
+
+    # 轮转档位对应的保留数（必须先算出来，/home 轮转也要用）
+    case "$_tier" in
+        hourly) _keep=$KEEP_HOURLY ;;
+        daily)  _keep=$KEEP_DAILY ;;
+        weekly) _keep=$KEEP_WEEKLY ;;
+    esac
+
+    # /home 同步快照（用户数据独立快照）。
+    # 目的：AI/脚本改坏项目文件时可从快照按文件恢复，
+    # 不必整体回滚系统（见 ADR 0002 修订与 ordo-snap restore）。
+    # 失败不连坐：系统快照已成功，这里只记日志。
+    if [ -n "${HOME_SNAP_TARGET:-}" ] && zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        if zfs snapshot "$HOME_SNAP_TARGET@$_name" 2>/dev/null; then
+            log "created $HOME_SNAP_TARGET@$_name"
+            # 轮转 /home 同档位（与系统同一保留数）
+            _hcount=$(zfs list -H -t snapshot -o name "$HOME_SNAP_TARGET" 2>/dev/null \
+                      | grep -c "@auto-${_tier}-" || true)
+            if [ "$_hcount" -gt "$_keep" ]; then
+                _hexcess=$((_hcount - _keep))
+                zfs list -H -t snapshot -o name -s creation "$HOME_SNAP_TARGET" 2>/dev/null \
+                    | grep "@auto-${_tier}-" | head -n "$_hexcess" \
+                    | while IFS= read -r _hold; do
+                        zfs destroy "$_hold" 2>/dev/null && log "rotated out $_hold" \
+                            || log "failed to destroy $_hold"
+                    done
+            fi
+        else
+            log "failed to create $HOME_SNAP_TARGET@$_name (system snap OK)"
+        fi
+    fi
+
+    _count=$(zfs list -H -t snapshot -o name "$TARGET" 2>/dev/null \
+             | grep -c "@auto-${_tier}-" || true)
+
+    if [ "$_count" -gt "$_keep" ]; then
+        _excess=$((_count - _keep))
+        zfs list -H -t snapshot -o name -s creation "$TARGET" 2>/dev/null \
+            | grep "@auto-${_tier}-" \
+            | head -n "$_excess" \
+            | while IFS= read -r _old; do
+                if zfs destroy "$_old" 2>/dev/null; then
+                    log "rotated out $_old"
+                else
+                    log "failed to destroy $_old"
+                fi
+            done
+        _count=$_keep
+    fi
+
+    log "tier=$_tier count=$_count keep=$_keep"
+done
+
+log "done on $TARGET (tiers: $_tiers)"

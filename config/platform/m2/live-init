@@ -1,0 +1,22 @@
+#!/bin/sh
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+rel=$(uname -r)
+dir=/usr/lib/modules
+if [ '@USB_PAYLOAD@' = 1 ]; then
+    if [ "$rel" != '@LIVE_RELEASE@' ] || [ ! -s "$dir/$rel/modules.dep.bin" ]; then
+        echo "[ordo-live] Native Live kernel and module index do not match."
+        exec /usr/bin/bash -i
+    fi
+elif [ "$rel" = '@LIVE_RELEASE@' ] && mkdir -p "$dir" && tar -xzf /mnt/payload/kernel/modules.tar.gz -C "$dir" && [ -s "$dir/$rel/modules.dep.bin" ]; then
+    cp /ordo-power.ko /@POWER_MODULE@ || exit 1
+else
+    echo "[ordo-live] Could not stage matching hardware modules; check /mnt/payload."
+fi
+if [ -s "$dir/$rel/modules.dep.bin" ]; then
+    echo "[ordo-live] Matching Asahi modules ready ($rel)"
+    for module in @PLATFORM_MODULES@; do
+        modprobe "$module" || echo "[ordo-live] Could not load $module" >&2
+    done
+fi
+chown 0:0 /var /var/tmp
+exec /sbin/init

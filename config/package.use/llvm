@@ -1,0 +1,15 @@
+# LLVM 构建裁剪（回填自实机 /etc/portage/package.use/ordo-clang.conf
+# 与 ordo-experiment.conf，2026-11-22；clang 在 world，编译以小时计）
+# 【规则】每行一个包，紧跟注释说明原因。
+
+# clang：去掉三个纯增量的组件
+llvm-core/clang                   -static-analyzer -extra -xml
+#   -static-analyzer：独立静态分析器，栈内无人用
+#   -extra：extra checker 生态（会拖额外依赖）
+#   -xml：XML 支持组件，无消费者
+
+# clang-runtime：不编 sanitizer 运行时
+llvm-runtimes/clang-runtime       -sanitize
+#   -sanitize：每条 sanitizer runtime 都是额外整编；不调试运行时内存问题
+dev-lang/rust-bin                rust-src
+#   rust-src：asahi-sources 7.x 内核启用 Rust-for-Linux（autounmask 实测）

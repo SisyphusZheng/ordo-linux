@@ -1,0 +1,32 @@
+#!/sbin/openrc-run
+# greetd 的 OpenRC 服务文件
+#
+# 上游 greetd 只提供 systemd unit（/usr/lib/systemd/system/greetd.service）。
+# 本文件补齐 OpenRC 支持，行为对应上游 unit：
+#   Type=simple / Restart=always / Alias=display-manager.service
+#
+# 与 SDDM 的差异：greetd 自行管理 VT 切换（见 config.toml 的 [terminal] vt），
+# 不经过 display-manager 包装脚本。两者不可同时启用——本服务 provide display-manager，
+# 因此与 /etc/init.d/display-manager 互斥。
+
+description="Greeter daemon (login manager)"
+supervisor="supervise-daemon"
+command="/usr/bin/greetd"
+command_args="-c /etc/greetd/config.toml"
+command_user="root"
+respawn_delay=1
+respawn_max=5
+respawn_period=30
+
+depend() {
+    # dbus 与 elogind 必须先于 greetd 启动：
+    # greetd 若抢先于 elogind 启动，会话拿不到 seat（niri 报 os error 38）。
+    need localmount dbus elogind
+    after bootmisc
+    provide display-manager
+}
+
+# greetd 独占 config.toml 中指定的 VT。
+# 该 VT 上的 getty 必须从 /etc/inittab 移除，否则两者同时读键盘，
+# 表现为输入错乱（"orood"、"Passwordo"）与登录框重影。
+# 安装时由 install.sh 处理 inittab。

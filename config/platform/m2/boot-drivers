@@ -1,0 +1,8 @@
+xhci-hcd
+xhci-plat-hcd
+usb-storage
+scsi_mod
+sd_mod
+appledrm
+brcmfmac
+hci_bcm4377

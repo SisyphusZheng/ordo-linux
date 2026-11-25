@@ -1,0 +1,7 @@
+
+[general]
+runfile = "/var/lib/ordo/greetd-first-session"
+
+[initial_session]
+user = "ordo"
+command = "/usr/local/bin/ordo-umbriel-session"

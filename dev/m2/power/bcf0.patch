@@ -1,0 +1,35 @@
+--- a/drivers/power/supply/macsmc-power.c
++++ b/drivers/power/supply/macsmc-power.c
+@@ -418,0 +419,21 @@
++/* The firmware exposes BCF0 as either ui8 or ui32. */
++static int macsmc_read_empty_flag(struct macsmc_power *power, u32 *value)
++{
++	struct apple_smc_key_info info;
++	u8 byte;
++	int ret;
++
++	ret = apple_smc_get_key_info(power->smc, SMC_KEY(BCF0), &info);
++	if (ret < 0)
++		return ret;
++	if (info.size == sizeof(*value))
++		return apple_smc_read_u32(power->smc, SMC_KEY(BCF0), value);
++	if (info.size != sizeof(byte))
++		return -EINVAL;
++
++	ret = apple_smc_read_u8(power->smc, SMC_KEY(BCF0), &byte);
++	if (ret >= 0)
++		*value = byte;
++	return ret;
++}
++
+@@ -426 +447 @@
+-	if (apple_smc_read_u32(power->smc, SMC_KEY(BCF0), &val) >= 0 && val)
++	if (macsmc_read_empty_flag(power, &val) >= 0 && val)
+@@ -827 +848 @@
+-	ret = apple_smc_read_u32(power->smc, SMC_KEY(BCF0), &bcf0);
++	ret = macsmc_read_empty_flag(power, &bcf0);
+@@ -830,0 +852 @@
++		return;
+@@ -992 +1014 @@
+-	apple_smc_read_u32(power->smc, SMC_KEY(BCF0), &val32);
++	macsmc_read_empty_flag(power, &val32);

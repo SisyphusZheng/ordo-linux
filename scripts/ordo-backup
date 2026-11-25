@@ -1,0 +1,526 @@
+#!/bin/sh
+# ordo-backup — ZFS 备份管理（send / list / verify / status）
+#
+# 快照与被保护数据同池，池损坏时一并丢失。本命令用 zfs send 导出到池外。
+#
+# 操作对象为 RUNNING_ROOT，不是 DATASET（回滚后 DATASET 指向未运行的旧系统）。
+#
+# 默认行为：
+#   1. zfs send 不带 -R：单数据集流，范围可预测
+#   2. 先写 <目标>.part，成功后 mv：中断不留下半截备份
+#   3. 目标已存在时拒绝覆盖，需 --force
+#   4. 发送前比较 zfs get refer 与目标可用空间
+#   5. 不自动删除备份文件
+
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+. "$_dir/ordo-i18n.sh"
+
+PROG="ordo backup"
+ACTION="${1:-status}"
+shift 2>/dev/null || true
+
+# 操作对象：永远用实际运行的根
+SNAP_TARGET="$RUNNING_ROOT"
+
+# 备份记录：只追加、不轮转。写不进去只警告，不阻断备份本身。
+BACKUP_LOG="/var/lib/ordo/backup.log"
+
+# require_root 来自 lib.sh。
+
+usage() {
+    cat <<EOF
+$PROG — ZFS 备份管理（zfs send 离线备份；快照 ≠ 备份）
+
+用法: $PROG <动作> [参数]
+
+动作:
+  send <目标路径> [选项] [快照名]
+                          把快照 zfs send 到目标（默认取最新快照）
+                          目标是「已存在的目录」时自动命名:
+                            <数据集路径带->-<快照名>-<时间戳>.zfs.gz
+                          显式文件路径则原样使用
+  list                    列出可备份的快照 + 最近备份记录
+  verify <备份文件>       干跑验证：gzip 校验 + zfs receive -n（不写入任何数据）
+  status                  显示备份配置与最近一次备份
+
+send 选项:
+  --force                 允许覆盖已存在的目标（默认拒绝覆盖）
+  --no-compress           不压缩，输出原始 ZFS 流（目录模式下扩展名 .zfs）
+  -h, --help              显示本帮助
+
+对象与范围:
+  - 备份源永远是「运行中的根数据集」($SNAP_TARGET)，不是配置里的规范名
+  - 单数据集发送（不带 -R）：$HOME_DATASET 等兄弟/子数据集不在备份内，
+    需要时请单独备份
+  - 先写 <目标>.part，成功后 mv：中断不会留下半截的「完整备份」
+  - 默认 zfs send | gzip，zfs send -v 的进度输出到 stderr
+  - 本命令绝不自动删除任何备份文件
+
+示例:
+  $PROG list
+  $PROG send /mnt/usb-backup
+  $PROG send /mnt/usb-backup/ordo-20261119.zfs.gz
+  $PROG send /mnt/usb-backup --no-compress auto-hourly-20261119-120000
+  $PROG verify /mnt/usb-backup/rpool-root-ordo-auto-hourly-20261119-120000-20261119-211500.zfs.gz
+  $PROG status
+EOF
+}
+
+snap_used() { zfs get -H -o value used "$SNAP_TARGET@$1" 2>/dev/null; }
+snap_time() { zfs get -H -o value creation "$SNAP_TARGET@$1" 2>/dev/null; }
+
+# 最新快照名（不带 @；只取本数据集的，不含子数据集）
+latest_snapshot() {
+    zfs list -H -t snapshot -o name -s creation "$SNAP_TARGET" 2>/dev/null \
+        | grep "^$SNAP_TARGET@" | tail -1 | sed "s|^$SNAP_TARGET@||"
+}
+
+# 字节 → 人类可读（numfmt 是 coreutils 的标准工具，ordo-snap-auto 已在用）
+human_bytes() {
+    numfmt --to=iec "$1" 2>/dev/null || printf '%sB\n' "$1"
+}
+
+# 用魔数判断是否 gzip 流（不靠扩展名，用户可能重命名过）
+_is_gzip() {
+    _magic="$(od -An -tx1 -N2 "$1" 2>/dev/null | tr -d ' \n')"
+    [ "$_magic" = "1f8b" ]
+}
+
+# 从状态文件读回管道左端的退出码；非数字一律当作失败
+# （宁可误报失败，不可误报成功——误报成功会让半截备份被当成完整备份）
+_read_status() {
+    _rs=1
+    if [ -s "$1" ]; then
+        _v="$(cat "$1" 2>/dev/null || true)"
+        case "$_v" in
+            ''|*[!0-9]*) _rs=1 ;;
+            *)           _rs="$_v" ;;
+        esac
+    fi
+    printf '%s' "$_rs"
+}
+
+# 追加一条备份记录（尽力而为：失败只警告）
+record_backup() {
+    _r_dir="$(dirname "$BACKUP_LOG")"
+    if ! mkdir -p "$_r_dir" 2>/dev/null; then
+        err "警告：无法创建记录目录 ${_r_dir}（备份本身已完成）" \
+            "Warning: cannot create $_r_dir (the backup itself is done)"
+        return 0
+    fi
+    if ! printf '%s|%s|%s|%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" \
+            "$SNAP_TARGET@$1" "$2" "$3" >> "$BACKUP_LOG" 2>/dev/null; then
+        err "警告：无法写入备份记录 ${BACKUP_LOG}（备份本身已完成）" \
+            "Warning: cannot write $BACKUP_LOG (the backup itself is done)"
+    fi
+    return 0
+}
+
+show_log_tail() {
+    _n="${1:-5}"
+    if [ ! -r "$BACKUP_LOG" ]; then
+        msg "  （无备份记录）" "  (no backup records)"
+        return 0
+    fi
+    tail -n "$_n" "$BACKUP_LOG" | while IFS='|' read -r _t _s _b _d; do
+        [ -z "$_t" ] && continue
+        printf '    %s  %s\n' "$_t" "$_d"
+        printf '      %s  %s bytes\n' "$_s" "$_b"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# send — 把快照 zfs send 到文件（.part 原子写入）
+# ---------------------------------------------------------------------------
+cmd_send() {
+    _force=0
+    _compress=1
+    _dest=""
+    _want_snap=""
+
+    for _a in "$@"; do
+        case "$_a" in
+            --force)       _force=1 ;;
+            --no-compress) _compress=0 ;;
+            -h|--help)     usage; exit 0 ;;
+            -*)
+                err "未知选项：$_a" "Unknown option: $_a"
+                msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
+                exit 1
+                ;;
+            *)
+                if [ -z "$_dest" ]; then
+                    _dest="$_a"
+                elif [ -z "$_want_snap" ]; then
+                    _want_snap="$_a"
+                else
+                    err "参数过多：$_a" "Too many arguments: $_a"
+                    exit 1
+                fi
+                ;;
+        esac
+    done
+
+    require_root "$PROG backup send $*"
+
+    if [ -z "$_dest" ]; then
+        err "需要目标路径（文件或已存在的目录）" "Destination path required (file or existing directory)"
+        msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
+        exit 1
+    fi
+
+    # --- 选择快照 ---
+    if [ -n "$_want_snap" ]; then
+        _snap="${_want_snap#*@}"
+        zfs list -H -t snapshot -o name "$SNAP_TARGET@$_snap" >/dev/null 2>&1 || {
+            err "快照不存在：${_snap}（数据集的快照：${SNAP_TARGET}）" \
+                "Snapshot not found: $_snap (on $SNAP_TARGET)"
+            msg "先运行 '$PROG list' 查看可备份的快照" "Run '$PROG list' to see available snapshots"
+            exit 1
+        }
+    else
+        _snap="$(latest_snapshot)"
+        if [ -z "$_snap" ]; then
+            err "当前数据集没有快照：$SNAP_TARGET" "No snapshots on $SNAP_TARGET"
+            msg "先创建快照：doas ordo snap create" "Create one first: doas ordo snap create"
+            exit 1
+        fi
+    fi
+
+    # --- 解析目标 ---
+    if [ -d "$_dest" ]; then
+        if [ "$_compress" = "1" ]; then
+            _suffix=".zfs.gz"
+        else
+            _suffix=".zfs"
+        fi
+        _base="$(printf '%s' "$SNAP_TARGET" | tr '/' '-')"
+        _dest="${_dest%/}/${_base}-${_snap}-$(date +%Y%m%d-%H%M%S)${_suffix}"
+    else
+        case "$_dest" in
+            */)
+                err "目标目录不存在：$_dest" "Destination directory not found: $_dest"
+                exit 1
+                ;;
+        esac
+    fi
+
+    _part="${_dest}.part"
+
+    # --- 覆盖保护（默认拒绝，--force 才放行）---
+    if [ -e "$_dest" ] && [ "$_force" != "1" ]; then
+        err "目标已存在，拒绝覆盖：$_dest" "Destination exists, refusing to overwrite: $_dest"
+        err "  确需覆盖请显式加 --force" "  pass --force to overwrite"
+        exit 1
+    fi
+    if [ -e "$_part" ] && [ "$_force" != "1" ]; then
+        err "残留的临时文件：$_part" "Leftover temporary file: $_part"
+        err "  可能来自一次中断的备份；确认无并发备份后加 --force 覆盖" \
+            "  likely from an interrupted backup; use --force if no other backup is running"
+        exit 1
+    fi
+
+    _dir="$(dirname "$_dest")"
+    if [ ! -d "$_dir" ]; then
+        err "目标目录不存在：$_dir" "Destination directory not found: $_dir"
+        exit 1
+    fi
+    if [ ! -w "$_dir" ]; then
+        err "目标目录不可写：$_dir" "Destination directory not writable: $_dir"
+        exit 1
+    fi
+
+    # 歧义提示：不存在的无扩展名路径会被当成文件（例如把未挂载的 /mnt/usb 当目录）。
+    # 不拒绝——文件名可以合法地没有点——但必须让用户看见这个解释。
+    if [ ! -e "$_dest" ]; then
+        case "${_dest##*/}" in
+            *.*) ;;
+            *)
+                err "注意：${_dest} 不存在且无扩展名，将按「文件」处理（不会自动创建目录）" \
+                    "Note: $_dest does not exist and has no extension; treating it as a FILE"
+                err "  若本意是目录，请先挂载/创建它，或显式以 / 结尾" \
+                    "  if you meant a directory, mount/create it first or end the path with /"
+                ;;
+        esac
+    fi
+
+    # --- 同池警告：备份必须在池外，否则池损坏时一起丢失 ---
+    # 只在目标确实是 ZFS 数据集（findmnt 给出 pool/dataset 形式）时比较；
+    # 目标是 /dev/sdb1 之类的块设备挂载时比较无意义，直接跳过。
+    _dst_src="$(findmnt -no SOURCE -T "$_dir" 2>/dev/null || true)"
+    case "$_dst_src" in
+        /*|'') ;;   # 块设备路径或识别失败：不是 ZFS 数据集名，跳过
+        */*)
+            _src_pool="${SNAP_TARGET%%/*}"
+            _dst_pool="${_dst_src%%/*}"
+            if [ "$_src_pool" = "$_dst_pool" ]; then
+                err "警告：目标与源在同一个池 ${_src_pool} 上——池损坏会同时丢失快照和备份" \
+                    "Warning: destination is on the same pool ($_src_pool) as the source; pool loss loses both"
+            fi
+            ;;
+    esac
+
+    # --- 空间预检 ---
+    # refer 是「数据集引用的逻辑字节数」（-p 取精确数字，避免解析 1.2G 这种字符串）。
+    # 实际发送的是压缩后的流（ZFS 自身压缩 + gzip），所以这是偏保守的上界；
+    # 偏保守的方向是安全的：宁可拒绝，不要在写到一半时把目标盘撑爆。
+    _est_bytes="$(zfs get -H -p -o value refer "$SNAP_TARGET@$_snap" 2>/dev/null || true)"
+    case "$_est_bytes" in
+        ''|*[!0-9]*) _est_bytes="" ;;
+    esac
+    _free_kb="$(df -Pk "$_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
+    case "$_free_kb" in
+        ''|*[!0-9]*) _free_kb="" ;;
+    esac
+
+    _free_bytes=0
+    if [ -n "$_est_bytes" ] && [ -n "$_free_kb" ]; then
+        _free_bytes=$((_free_kb * 1024))
+        if [ "$_free_bytes" -lt "$_est_bytes" ]; then
+            err "空间不足，拒绝备份" "Not enough space, refusing to back up"
+            err "  预计需要（源 refer）：$(human_bytes "$_est_bytes")" \
+                "  estimated need (source refer): $(human_bytes "$_est_bytes")"
+            err "  目标可用：$(human_bytes "$_free_bytes")" \
+                "  destination free: $(human_bytes "$_free_bytes")"
+            exit 1
+        fi
+    else
+        err "警告：无法估算大小或目标可用空间，跳过空间预检" \
+            "Warning: cannot estimate size or free space, skipping the space check"
+        _est_bytes=""
+    fi
+
+    warn_if_identity_drift
+
+    printf '\n'
+    msg "备份 $SNAP_TARGET@$_snap" "Backing up $SNAP_TARGET@$_snap"
+    msg "  目标：$_dest" "  target: $_dest"
+    if [ -n "$_est_bytes" ]; then
+        msg "  预计大小（源 refer）：$(human_bytes "$_est_bytes")" \
+            "  estimated size (source refer): $(human_bytes "$_est_bytes")"
+        msg "  目标可用：$(human_bytes "$_free_bytes")" \
+            "  destination free: $(human_bytes "$_free_bytes")"
+    fi
+    if [ "$_compress" = "1" ]; then
+        msg "  压缩：gzip" "  compression: gzip"
+    else
+        msg "  压缩：无（原始 ZFS 流）" "  compression: none (raw ZFS stream)"
+    fi
+    printf '\n'
+
+    # --force 的语义是「可以覆盖既有 .part」。注意：这里不保证并发安全——
+    # 同一目标同时跑两个备份时，后一个会覆盖前一个的 .part。这是刻意的取舍：
+    # 加锁会引入锁文件残留与陈旧锁清理问题，而桌面场景下并发备份同一目标
+    # 本身就是误操作。不加 --force 时，第二个进程会因 .part 已存在而拒绝。
+    if [ "$_force" = "1" ]; then
+        rm -f "$_part"
+    fi
+
+    # --- 发送 ---
+    # POSIX sh 没有 pipefail：`zfs send | gzip` 的退出码只是 gzip 的，
+    # zfs send 中途失败而 gzip 正常结束时会被误判为成功（半截备份被当成完整）。
+    # 所以用状态文件把左端退出码带回来，两端都必须为 0。
+    # 状态文件放 TMPDIR，不污染备份目录（备份目录可能是只读挂载或已写满）。
+    _send_status="${TMPDIR:-/tmp}/ordo-backup-$$.status"
+    rm -f "$_send_status"
+    _rc=0
+    if [ "$_compress" = "1" ]; then
+        { zfs send -v "$SNAP_TARGET@$_snap" || printf '%s\n' "$?" > "$_send_status"; } \
+            | gzip > "$_part" || _rc=$?
+    else
+        zfs send -v "$SNAP_TARGET@$_snap" > "$_part" || _rc=$?
+    fi
+    _send_rc=0
+    if [ -s "$_send_status" ]; then
+        _send_rc="$(_read_status "$_send_status")"
+    fi
+    rm -f "$_send_status"
+
+    if [ "$_rc" -ne 0 ] || [ "$_send_rc" -ne 0 ]; then
+        err "备份失败（zfs send=$_send_rc, 写入=${_rc}）" \
+            "Backup failed (zfs send=$_send_rc, write=$_rc)"
+        rm -f "$_part"
+        err "  已删除半成品 $_part" "  removed partial file $_part"
+        exit 1
+    fi
+
+    if [ ! -s "$_part" ]; then
+        err "备份文件为空（异常）" "Backup file is empty (unexpected)"
+        rm -f "$_part"
+        exit 1
+    fi
+
+    # --- 原子落盘：同一目录内的 mv 是 rename，不会留下半截 ---
+    if ! mv -f "$_part" "$_dest"; then
+        err "重命名失败，半成品保留在 $_part" "Rename failed; partial file kept at $_part"
+        exit 1
+    fi
+
+    _bytes="$(wc -c < "$_dest" | tr -d ' ')"
+    record_backup "$_snap" "$_bytes" "$_dest"
+
+    printf '\n'
+    msg "完成：$_dest" "Done: $_dest"
+    msg "  大小：$(human_bytes "$_bytes")（${_bytes} 字节）" \
+        "  size: $(human_bytes "$_bytes") (${_bytes} bytes)"
+    msg "  建议验证：$PROG verify $_dest" "  verify with: $PROG verify $_dest"
+}
+
+# ---------------------------------------------------------------------------
+# list — 可备份的快照 + 最近备份记录
+# ---------------------------------------------------------------------------
+cmd_list() {
+    warn_if_identity_drift
+
+    _names="$(zfs list -H -t snapshot -o name -s creation "$SNAP_TARGET" 2>/dev/null \
+              | grep "^$SNAP_TARGET@" || true)"
+
+    if [ -z "$_names" ]; then
+        msg "（无快照，没有可备份的内容）" "(no snapshots; nothing to back up)"
+        msg "先创建快照：doas ordo snap create" "Create one first: doas ordo snap create"
+        return 0
+    fi
+
+    msg "可备份的快照（${SNAP_TARGET}）：" "Snapshots available for backup ($SNAP_TARGET):"
+    printf '\n'
+    printf '%s\n' "$_names" | while IFS= read -r _full; do
+        [ -z "$_full" ] && continue
+        _s="${_full#*@}"
+        printf '    %-42s %8s  %s\n' "$_s" "$(snap_used "$_s")" "$(snap_time "$_s")"
+    done
+
+    printf '\n'
+    msg "最近备份记录（${BACKUP_LOG}）：" "Recent backups ($BACKUP_LOG):"
+    show_log_tail 5
+}
+
+# ---------------------------------------------------------------------------
+# verify — gzip 完整性 + zfs receive -n 干跑（绝不写入）
+# ---------------------------------------------------------------------------
+cmd_verify() {
+    _file="${1:-}"
+
+    if [ -z "$_file" ]; then
+        err "需要备份文件路径" "Backup file path required"
+        msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
+        exit 1
+    fi
+    if [ ! -f "$_file" ]; then
+        err "文件不存在：$_file" "File not found: $_file"
+        exit 1
+    fi
+    if [ ! -r "$_file" ]; then
+        err "文件不可读：$_file" "File not readable: $_file"
+        exit 1
+    fi
+
+    require_root "$PROG backup verify $_file"
+
+    _size="$(wc -c < "$_file" | tr -d ' ')"
+    msg "验证 ${_file}（$(human_bytes "$_size")）" "Verifying $_file ($(human_bytes "$_size"))"
+
+    # 干跑接收目标：必须是一个「不存在」的名字（完整流会创建新数据集）。
+    # -n 只解析流、不落盘，所以这个名字永远不会真的出现。
+    _vpool="${SNAP_TARGET%%/*}"
+    _vt="${_vpool}/ordo-verify-dryrun-$(date +%Y%m%d-%H%M%S)"
+    msg "  干跑目标：${_vt}（zfs receive -n，不写入任何数据）" \
+        "  dry-run target: $_vt (zfs receive -n, writes nothing)"
+
+    _vstatus="${TMPDIR:-/tmp}/ordo-verify-$$.status"
+    rm -f "$_vstatus"
+    _rc=0
+    _src_rc=0
+
+    if _is_gzip "$_file"; then
+        msg "  归档格式：gzip" "  archive: gzip"
+        # 同样用状态文件捕获 gzip 的退出码：gzip 的 CRC 错误可能发生在
+        # 所有数据已输出之后，此时 zfs receive 仍会返回 0。
+        { gzip -dc "$_file" || printf '%s\n' "$?" > "$_vstatus"; } \
+            | zfs receive -n -v "$_vt" || _rc=$?
+    else
+        msg "  归档格式：原始 ZFS 流（未压缩）" "  archive: raw ZFS stream (uncompressed)"
+        zfs receive -n -v "$_vt" < "$_file" || _rc=$?
+    fi
+
+    if [ -s "$_vstatus" ]; then
+        _src_rc="$(_read_status "$_vstatus")"
+    fi
+    rm -f "$_vstatus"
+
+    if [ "$_rc" -ne 0 ] || [ "$_src_rc" -ne 0 ]; then
+        err "验证失败（解压=$_src_rc, zfs receive=${_rc}）" \
+            "Verification failed (decompress=$_src_rc, zfs receive=$_rc)"
+        err "  文件可能不完整（截断）或已损坏；不要把它当成可用备份" \
+            "  the file is likely truncated or corrupt; do not treat it as a usable backup"
+        exit 1
+    fi
+
+    printf '\n'
+    msg "验证通过：ZFS 流结构可接收，归档完整性校验通过" \
+        "Verification passed: ZFS stream is receivable, archive integrity verified"
+    msg "  恢复方法（示例，接收为新数据集）：" "  to restore (example, as a new dataset):"
+    if _is_gzip "$_file"; then
+        msg "    gzip -dc $_file | zfs receive ${_vpool}/restored" \
+            "    gzip -dc $_file | zfs receive ${_vpool}/restored"
+    else
+        msg "    zfs receive ${_vpool}/restored < $_file" \
+            "    zfs receive ${_vpool}/restored < $_file"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# status — 备份配置 + 最近一次备份
+# ---------------------------------------------------------------------------
+cmd_status() {
+    warn_if_identity_drift
+
+    _cnt="$(zfs list -H -t snapshot -o name "$SNAP_TARGET" 2>/dev/null \
+            | grep -c "^$SNAP_TARGET@" || true)"
+    _newest="$(latest_snapshot)"
+
+    msg "备份状态" "Backup status"
+    printf '\n'
+    msg "  源数据集：${SNAP_TARGET}（运行中的根）" "  source dataset: $SNAP_TARGET (running root)"
+    if is_rolled_back_env; then
+        msg "  规范名：  ${DATASET}（当前未运行，不作备份源）" \
+            "  canonical name: $DATASET (not running; not used as source)"
+    fi
+    if [ -n "$_newest" ]; then
+        msg "  快照数：  ${_cnt}（最新 ${_newest}，$(snap_time "$_newest")）" \
+            "  snapshots: $_cnt (newest $_newest, $(snap_time "$_newest"))"
+    else
+        msg "  快照数：  0（没有可备份的内容）" "  snapshots: 0 (nothing to back up)"
+    fi
+    msg "  发送模式：单数据集 zfs send（不带 -R；$HOME_DATASET 不在内）" \
+        "  send mode: single-dataset zfs send (no -R; $HOME_DATASET not included)"
+    msg "  压缩：    默认 gzip（--no-compress 可关闭）" \
+        "  compression: gzip by default (--no-compress to disable)"
+    msg "  原子写入：<目标>.part → 成功后 mv" "  atomic write: <target>.part -> mv on success"
+    msg "  覆盖保护：默认拒绝，--force 放开" "  overwrite guard: refused by default, --force to override"
+    msg "  记录文件：$BACKUP_LOG" "  record file: $BACKUP_LOG"
+    printf '\n'
+
+    if [ -s "$BACKUP_LOG" ]; then
+        msg "  最近一次备份：" "  last backup:"
+        show_log_tail 1
+    else
+        msg "  最近一次备份：（无记录）" "  last backup: (none recorded)"
+    fi
+}
+
+case "$ACTION" in
+    send)        cmd_send "$@" ;;
+    list)        cmd_list ;;
+    verify)      cmd_verify "$@" ;;
+    status)      cmd_status ;;
+    -h|--help|help) usage ;;
+    *)
+        err "未知动作：$ACTION" "Unknown action: $ACTION"
+        msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
+        exit 1
+        ;;
+esac

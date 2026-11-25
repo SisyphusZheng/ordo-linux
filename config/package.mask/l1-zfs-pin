@@ -1,0 +1,20 @@
+# zfs 版本策略（deviations #4）
+#
+# 背景：
+#  - 2.4.4 起为单包（MODULES_OPTIONAL_IUSE=+modules，自带内核模块），
+#    不再需要 sys-fs/zfs-kmod 独立包（其 ebuild 与 zfs 2.4.x 互斥）
+#  - live ISO 的 zfs 是 2.4.4，pool 特性由它创建；系统必须 >= 2.4.4
+#  - zfs 2.4.4 硬限 MODULES_KERNEL_MAX=7.2 —— 内核 >= 7.3 时 zfs 编不过
+#
+# 【修】旧版只写了四个精确版本 `=sys-kernel/*-7.3.4`。
+# 这是「钉一个版本号」而不是「钉一条边界」：树里出现 7.3.5 / 7.4.0 /
+# 甚至 7.3.0~7.3.3 时全部漏过，zfs 的 >= 7.3 编译失败就会被触发。
+# 改成**下界屏蔽**：任何 >= 7.3 的内核包都不许装。
+#
+# 何时移除：上游 zfs 支持 7.3 后（OpenZFS 一般滞后 1-3 个月）。
+# 移除时同步收回 deviations #4。
+
+>=sys-kernel/gentoo-kernel-bin-7.3
+>=sys-kernel/gentoo-kernel-7.3
+>=sys-kernel/vanilla-kernel-7.3
+>=sys-kernel/gentoo-kernel-modprep-7.3

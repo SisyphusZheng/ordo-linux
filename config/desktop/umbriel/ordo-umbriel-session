@@ -1,0 +1,25 @@
+#!/bin/sh
+# ordo-umbriel-session — Umbriel 的会话入口（greetd 调用）
+#
+# 职责：先 source ordo-session-env（dbus / 输入法 / libseat 的环境修复），
+# 拉起音频栈，最后一行 exec 合成器。会话环境初始化全部在
+# ordo-session-env 里，本脚本只做 Umbriel 特有的部分。
+set -eu
+
+. /usr/local/bin/ordo-session-env
+
+export XDG_CURRENT_DESKTOP=Umbriel
+
+# 音频栈：pipewire + wireplumber。
+# 【必须后台化】gentoo-pipewire-launcher 末尾是 `exec /usr/bin/wireplumber`，
+# 它会一直前台阻塞；同步调用会让本脚本永远走不到最后一行的 exec 合成器，
+# 表现为：greetd 登录后黑屏卡死，tty1 上只剩 wireplumber（2026-11-23 实测，
+# 会话 shell 停在 do_wait，子进程是 wireplumber）。
+# 用户级 OpenRC（install.sh 14b 段启用的 user.ordo）已管理音频服务，
+# 这里只作兜底，故用 & 放到后台，不阻塞启动。
+gentoo-pipewire-launcher >/dev/null 2>&1 &
+
+# Umbriel 自己拉起 Noctalia（见 config.toml 的 general.autostart）。
+# 不要在这里手动 spawn：它必须在合成器的 WAYLAND_DISPLAY 就绪后启动，
+# 而 autostart 正是那个时机点。
+exec start-umbriel

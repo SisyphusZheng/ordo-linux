@@ -1,0 +1,25 @@
+# Ordo — Luciole 基础配置
+#
+# 这是 base configuration：Luciole 的 GUI 改动写进
+# ~/.config/luciole/settings.toml，永远不会改这个文件，
+# 所以它可以被 OneConfig 用软链接拥有。
+#
+# 配色不在这里：Noctalia 的模板生成 ~/.config/luciole/colors.toml，
+# Luciole 检测到写入即热重载。换配色请换壁纸/调色板。
+
+schema_version = 1
+
+[browser]
+# 窗口背景透明度。标签页、工具栏、侧栏、文件区共用此值；
+# 菜单与对话框保持不透明。0 = 全透明，1 = 不透明。
+background_opacity = 0.88
+
+# 圆角缩放：0 = 直角，2 = 最大圆角，缩放每一个圆角半径
+# （窗口、菜单、对话框）。与 Noctalia 的同名设置语义一致。
+corner_radius_scale = 1.8
+
+# 让合成器画标题栏与边框（服务端装饰）。
+# 依赖 umbriel 的 [appearance] prefer_no_csd = true（config/desktop/umbriel/
+# config.toml 已显式声明；umbriel config validate 实测该键合法）。
+# 两边必须成对改：一边关 SSD 一边不声明，Luciole 会画自己的 CSD 标题栏。
+use_ssd = true

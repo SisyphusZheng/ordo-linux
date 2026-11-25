@@ -1,0 +1,2 @@
+# VM 独立池名。制盘机可以同时存在 rpool。
+POOL="${POOL:-ordovm}"

@@ -1,0 +1,16 @@
+# Ordo — greetd 的 PAM 栈
+#
+# 为什么声明这个文件：gnome-keyring 的自动解锁必须接进 greetd 用的 PAM 栈。
+# 缺了这两行 pam_gnome_keyring，登录后密钥环保持锁定，Chrome 一碰存储就
+# 弹窗要求「再输一遍密码」。上游文档明确：改的是 /etc/pam.d/greetd，
+# 即使通用指南写的是 /etc/pam.d/login（noctalia-dev/noctalia-docs
+# greeter/troubleshooting → "Keyring or KWallet asks for a password after login"）。
+#
+# 前提：Login 密钥环的密码与账户密码一致（Seahorse 里改）。
+# 部署：install.sh install -Dm644 到 /etc/pam.d/greetd。
+auth            include         login
+auth            optional        pam_gnome_keyring.so
+account         include         login
+password        include         login
+session         include         login
+session         optional        pam_gnome_keyring.so auto_start

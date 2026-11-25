@@ -1,0 +1,63 @@
+# ============================================================
+# ordo — 系统层构建参数（唯一事实来源）
+# 由 install.sh 复制到 /etc/portage/make.conf
+# ============================================================
+
+# ---- 镜像（国内可达）----
+GENTOO_MIRRORS="https://mirrors.ustc.edu.cn/gentoo"
+SYNC="rsync://mirrors.ustc.edu.cn/gentoo-portage"
+# 二进制包服务器（L1 留空 = 本地编译；L2 填自己的 binhost）
+BINHOST=""
+
+# ---- 构建 ----
+# 并行度必须与【实际】vCPU 数一致。历史事故：模板写 -j6 而 UTM 只给 4 vCPU，
+# 超订 50% 后 guest 内存峰值打穿 8 GB → 全核 direct reclaim 活锁（网络/ssh/agent
+# 全死，但 vCPU 空转，看起来像"还在编译"）。改并行度前先 `nproc` 核对。
+# VM 默认 4 vCPU；真机按 nproc 调整（物理核数，不用超线程数）。
+# -l 给到 vCPU²（4→16）而非等于 vCPU 数，避免单核 load 抖动就砍掉并行 worker。
+MAKEOPTS="-j4 -l16"
+# --jobs=2 会让两个包同时编，峰值内存翻倍；clang/llvm 这类巨型包必须串行。
+EMERGE_DEFAULT_OPTS="--quiet-build=y --with-bdeps=y --jobs=1"
+# 注：不用 --complete-graph——新装系统会把 stage3 陈旧状态拉进图里制造假冲突
+
+# ---- 特性 ----
+# getbinpkg 只在 BINHOST 非空时启用（见 scripts/ordo）
+# ccache：编译中断不再从零开始（clang-22 一次 90min+，没有它就是一次性赌博）
+FEATURES="parallel-install clean-logs ccache"
+LC_COLLATE="C"
+
+# ---- ccache ----
+# 容量按 PKGDIR 之外的 /var/cache 空间给；8 GB 够存下 llvm 全量目标文件。
+# ⚠ 两处都要设：make.conf 的 CCACHE_DIR 只影响 emerge 自身加载期，
+#   真正编译的 cc1plus 子进程读的是 env.d（install.sh 会写 /etc/env.d/99ccache）。
+# ⚠ 目录必须 chown portage:portage 且 setgid，否则 portage 用户写不进去，
+#   表现是 ccache -s 永远显示 0.0 GB（2026-11-20 踩过）。
+CCACHE_SIZE="8G"
+CCACHE_DIR="/var/cache/ccache"
+# 直接模式：跨目录树复用同一文件的预处理结果（重编同版本源码时命中率最高）
+CCACHE_NOHASHDIR="true"
+
+# ---- 语言 / 时区 ----
+LINGUAS="zh_CN en"
+L10N="zh-CN en"
+
+# ---- 架构 / keyword ----
+# L1：VM 迭代期全局接受 ~arm64（桌面栈本来就是前沿组合）；L2 收紧回稳定优先
+# 由 install.sh 从 config/arch 注入：@ACCEPT_ARCH_KEYWORD@
+ACCEPT_KEYWORDS="${ACCEPT_KEYWORDS} @ACCEPT_ARCH_KEYWORD@"
+COMMON_FLAGS="-O2 -pipe -march=@MARCH@"
+CFLAGS="${COMMON_FLAGS}"
+CXXFLAGS="${COMMON_FLAGS}"
+FCFLAGS="${COMMON_FLAGS}"
+FFLAGS="${COMMON_FLAGS}"
+
+# ---- 视频驱动（Apple Silicon VM 用 virtio；真机另配）----
+VIDEO_CARDS="@VIDEO_CARDS@"
+
+# ---- 许可：ZFS 是 CDDL，必须显式接受 ----
+ACCEPT_LICENSE="* @FREE"
+# 注：@BINARY-REDISTRIBUTABLE 依场景调整；分发时需核对
+
+# ---- 关键 USE（全局最小集）----
+# elogind：GNOME 在没有 systemd 时的会话管理
+USE="-systemd elogind -gnome-keyring-prompt wayland X"

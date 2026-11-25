@@ -1,0 +1,12 @@
+# 禁止进入 world 的应用级包（doctor 第 8 项据此检查漂移）
+# 评审任何包之前先问："Flatpak 里有没有？"——见 README 包策略
+# 每行一个 atom；以 /* 结尾的条目按类目整类禁入（doctor/verify 都认这个语法）
+www-client/firefox
+app-office/libreoffice
+net-im/telegram-desktop
+# 编辑器整类禁入（AGENTS.md 明文：「编辑器 → Flatpak」）。
+# 曾经 world 里的 app-editors/neovim 因此被移除（2026-11-22）。
+app-editors/*
+# 豁免行（! 前缀）：base profile 养着、depclean 也不动的基线组件，
+# doctor 的 world 检查与 /var/db/pkg 扫描都不对其报警。
+!app-editors/nano

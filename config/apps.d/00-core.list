@@ -1,0 +1,13 @@
+# Ordo 首启应用清单 —— core 组（每个新人第一件事就要用的）
+#
+# 格式：一行一个 Flathub app id；# 开头为注释。
+# 由 install.sh 的「安装 Flatpak 应用清单」段读取并 flatpak install；
+# doctor 会断言 flatpak list 覆盖本清单（声明 = 系统）。
+#
+# 为什么是 Flatpak 而不是 world：
+#   浏览器/办公/IM/编辑器属于应用层（README 包策略）。系统层只留
+#   内核/ZFS/init/桌面外壳/字体/输入法/驱动。
+org.mozilla.firefox          # 浏览器（默认；Chrome 走 01-optional）
+io.github.flattool.Warehouse # 可视化 Flatpak 商店（宪法"可视化商店"验收点）
+# org.gnome.Nautilus 已移除（2026-11-22）：Luciole 同时是图形文件管理器与
+# 门户文件选择器，再装 Nautilus 就是两套同类组件（且它是 GTK4，写 dconf）。

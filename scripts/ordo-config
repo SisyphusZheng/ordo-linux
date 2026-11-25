@@ -1,0 +1,543 @@
+#!/bin/sh
+# ordo-config — OneConfig 统一配置入口（ADR 0008）
+#
+# 设计原则：
+#   - 单一真相源：所有配置在 config/ 下，本工具只读写那里
+#   - 可验证：verify 检查仓库配置 vs 系统实际状态的漂移
+#   - 幂等：apply 可重复执行
+#   - 可回滚：配置在 ZFS BE 内，回滚系统 = 回滚配置
+#
+# 用法：
+#   ordo config show                显示当前生效的完整配置
+#   ordo config verify              检查配置与实际系统的漂移
+#   ordo config apply <模块>        应用配置（kde | world | all）
+#   ordo config diff                对比仓库配置与系统实际状态
+#   ordo config path                显示配置仓库位置
+
+set -eu
+
+# 统一从 lib.sh 拿 ORDO_ROOT / CONF_DIR / POOL / DATASET 与三态退出码常量。
+# 【为什么】旧版本自己推导 CONF_DIR，且从不 source dataset —— 结果
+# `ordo config diff` 的「系统」栏恒显示 POOL=?（主 shell 里根本没这个变量）。
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+ordo_require_tools awk sed grep sort comm mktemp rm cat dirname basename readlink tr wc head cut
+
+# 允许用 ORDO_CONF_DIR 覆盖（开发/测试用）
+if [ -n "${ORDO_CONF_DIR:-}" ] && [ -d "${ORDO_CONF_DIR}" ]; then
+    CONF_DIR="$ORDO_CONF_DIR"
+fi
+
+[ -d "$CONF_DIR" ] || {
+    printf '!! 找不到配置目录：%s\n' "$CONF_DIR" >&2
+    printf '   设置 ORDO_CONF_DIR 或确认 /etc/ordo/config 存在\n' >&2
+    exit "$ORDO_EXIT_BAD"
+}
+
+say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
+ok() { printf '  \033[32m✔\033[0m %s\n' "$*"; }
+bad() { printf '  \033[31m✘\033[0m %s\n' "$*"; }
+info() { printf '  \033[36m·\033[0m %s\n' "$*"; }
+
+n_bad=0
+n_warn=0
+n_skip=0
+bad_inc()   { bad "$*";  n_bad=$((n_bad + 1)); }
+warn_inc()  { warn "$*"; n_warn=$((n_warn + 1)); }
+# skip = 无法判定（工具缺失/前置条件不满足）。绝不等于通过。
+skip_inc()  { printf '  \033[36m-\033[0m %s\n' "$*"; n_skip=$((n_skip + 1)); }
+
+# The selected Portage set contributes to @world when it is enabled.
+# Keep direct entries for systems installed before the set existed.
+_portage_world=/var/lib/portage/world
+_portage_sets=/var/lib/portage/world_sets
+_ordo_set=/etc/portage/sets/ordo-core
+
+_declared_world() {
+    [ -r "$CONF_DIR/world.sh" ] || return 2
+    # shellcheck source=config/world.sh
+    . "$CONF_DIR/world.sh"
+    _platform=$(ordo_platform) || return 2
+    ordo_world "$CONF_DIR" "$_platform"
+}
+
+_actual_world() {
+    [ -r "$_portage_world" ] || return 2
+    cat "$_portage_world" || return 2
+    printf '\n'
+    if [ -e "$_portage_sets" ]; then
+        [ -r "$_portage_sets" ] || return 2
+        _selected=$(cat "$_portage_sets") || return 2
+        if printf '%s\n' "$_selected" | awk '
+            { sub(/#.*/, ""); if (NF && (NF != 1 || ($1 != "@ordo-core" && $1 != "@ordo-m2"))) unknown=1 }
+            END { exit !unknown }
+        '; then
+            printf '%s\n' "有效 world 含无法按 Ordo 声明核对的其他 Portage set" >&2
+            return 2
+        fi
+        for _set_file in "$_ordo_set" "${_ordo_set%/*}/ordo-m2"; do
+            _set_name=@${_set_file##*/}
+            if printf '%s\n' "$_selected" | awk -v name="$_set_name" '$1 == name { found=1 } END { exit !found }'; then
+                cat "$_set_file" || return 2
+                printf '\n'
+            fi
+        done
+    fi
+}
+
+_normalize_world() {
+    awk '{ sub(/#.*/, ""); if (NF) print $1 }' "$@" \
+        | sed -e 's/::.*//' -e 's/:[^/]*$//' | LC_ALL=C sort -u
+}
+
+_compare_world() {
+    _world_tmp=$(mktemp -d) || return 2
+    if ! _declared_world > "$_world_tmp/declared" || ! _actual_world > "$_world_tmp/actual"; then
+        return 2
+    fi
+    _normalize_world "$_world_tmp/declared" > "$_world_tmp/expected" || return 2
+    [ -s "$_world_tmp/expected" ] || return 2
+    _normalize_world "$_world_tmp/actual" > "$_world_tmp/selected" || return 2
+    if [ -r "$CONF_DIR/oneshot-packages" ]; then
+        _normalize_world "$CONF_DIR/oneshot-packages" > "$_world_tmp/oneshot" || return 2
+        LC_ALL=C comm -23 "$_world_tmp/selected" "$_world_tmp/oneshot" > "$_world_tmp/managed" || return 2
+        LC_ALL=C comm -13 "$_world_tmp/expected" "$_world_tmp/managed" > "$_world_tmp/extra" || return 2
+    else
+        LC_ALL=C comm -13 "$_world_tmp/expected" "$_world_tmp/selected" > "$_world_tmp/extra" || return 2
+    fi
+    LC_ALL=C comm -23 "$_world_tmp/expected" "$_world_tmp/selected" > "$_world_tmp/missing"
+}
+
+# ---------- show ----------
+cmd_show() {
+    say "Ordo 配置总览（$CONF_DIR）"
+    echo ""
+
+    # 1) 数据集布局（打印**解析后的值**，而不是 shell 源码）
+    #    【修】旧版直接 grep 文件内容，于是用户看到的是
+    #    `DATASET="${DATASET:-$POOL/root/ordo}"` 这样的源码，
+    #    「show 显示当前生效的配置」这个承诺没兑现。
+    echo "[数据集布局] config/dataset"
+    if [ -r "$CONF_DIR/dataset" ]; then
+        ( . "$CONF_DIR/dataset" && \
+          printf '  POOL         = %s\n  DATASET      = %s\n  HOME_DATASET = %s\n' \
+                 "$POOL" "$DATASET" "$HOME_DATASET" ) 2>/dev/null \
+            || warn_inc "config/dataset 解析失败"
+    else
+        warn_inc "config/dataset 缺失"
+    fi
+    echo ""
+
+    # 2) 架构（同样打印解析后的值）
+    echo "[架构] config/arch"
+    if [ -r "$CONF_DIR/arch" ]; then
+        ( . "$CONF_DIR/arch" && \
+          printf '  ARCH           = %s\n  PROFILE        = %s\n  MARCH          = %s\n  VIDEO_CARDS    = %s\n  ACCEPT_KEYWORDS= %s\n' \
+                 "$ARCH" "$PROFILE" "$MARCH" "$VIDEO_CARDS" "$ACCEPT_ARCH_KEYWORD" ) 2>/dev/null \
+            || warn_inc "config/arch 解析失败（当前平台不支持该 ARCH？）"
+    else
+        warn_inc "config/arch 缺失"
+    fi
+    echo ""
+
+    # 3) 包集规模
+    echo "[包集] config/world"
+    if [ -r "$CONF_DIR/world" ]; then
+        _n=$(grep -vcE '^[[:space:]]*#|^[[:space:]]*$' "$CONF_DIR/world" 2>/dev/null || true)
+        info "$_n 个顶层包（详见 $CONF_DIR/world）"
+    else
+        warn_inc "config/world 缺失"
+    fi
+    echo ""
+
+    # 4) 桌面资产（Noctalia 全家桶：Umbriel + Shell + Greeter）
+    echo "[桌面] config/desktop/{umbriel,noctalia,greetd}/"
+    for _f in desktop/umbriel/config.toml \
+              desktop/noctalia/config.toml \
+              desktop/greetd/config.toml \
+              desktop/ordo-session-env; do
+        if [ -e "$CONF_DIR/$_f" ]; then
+            info "${_f#desktop/}"
+        else
+            warn_inc "${_f#desktop/} 缺失"
+        fi
+    done
+    echo ""
+
+    # 4a2) 壁纸
+    echo "[壁纸] config/desktop/wallpapers/"
+    if [ -d "$CONF_DIR/desktop/wallpapers" ]; then
+        _n=$(ls -1 "$CONF_DIR/desktop/wallpapers"/*.png 2>/dev/null | wc -l | tr -d ' ')
+        info "${_n} 张壁纸（配色由 Noctalia 从壁纸提取）"
+    else
+        warn_inc "config/desktop/wallpapers/ 缺失"
+    fi
+    echo ""
+
+    # 4b) Flatpak 应用清单
+    echo "[应用层] config/apps.d/"
+    if [ -d "$CONF_DIR/apps.d" ]; then
+        _n=$(ls -1 "$CONF_DIR/apps.d" 2>/dev/null | wc -l | tr -d ' ')
+        info "${_n} 个清单文件（首启安装哪些 Flatpak 应用）"
+    else
+        warn_inc "config/apps.d/ 缺失（首启无应用可装）"
+    fi
+    echo ""
+
+    # 5) 禁入清单
+    echo "[应用层禁入] config/forbidden-world"
+    if [ -r "$CONF_DIR/forbidden-world" ]; then
+        _n=$(grep -vcE '^[[:space:]]*#|^[[:space:]]*$' "$CONF_DIR/forbidden-world" 2>/dev/null || true)
+        info "$_n 条（这些包必须走 Flatpak，不得进 world）"
+    else
+        warn_inc "config/forbidden-world 缺失"
+    fi
+}
+
+# ---------- verify ----------
+cmd_verify() {
+    say "配置一致性检查"
+    echo ""
+
+    # 1) dataset 配置 vs 运行系统
+    echo "[1] 数据集"
+    if [ -r "$CONF_DIR/dataset" ]; then
+        # config/dataset 本身就是可 source 的 shell 片段（install.sh 也这样用）。
+        # 用 sed 解析 ${VAR:-default} 会拿到字面量，是错的。
+        # 在子 shell 里 source，避免污染本脚本的 POOL/DATASET 变量。
+        _conf_pool=$( (. "$CONF_DIR/dataset" && printf '%s' "$POOL") 2>/dev/null || echo "?" )
+        _conf_ds=$(   (. "$CONF_DIR/dataset" && printf '%s' "$DATASET") 2>/dev/null || echo "?" )
+        info "配置: pool=${_conf_pool} dataset=${_conf_ds}"
+        # 【假绿灯修复】旧写法：findmnt 缺失 → _run_root="" → `[ -n "" ]` 短路
+        # → 落入 else 打「✔ 一致」。查不到必须报「无法判定」，不是通过。
+        if ! command -v findmnt >/dev/null 2>&1; then
+            info "运行: ?（findmnt 不可用）"
+            skip_inc "无法判定运行根数据集（findmnt 不可用；不是通过）"
+        else
+            _run_root=$(findmnt -no SOURCE / 2>/dev/null || true)
+            info "运行: ${_run_root:-?}"
+            if [ -z "$_run_root" ]; then
+                skip_inc "无法判定运行根数据集（findmnt 无输出；不是通过）"
+            elif [ "$_run_root" = "$_conf_ds" ]; then
+                ok "一致"
+            else
+                warn_inc "运行根与配置名不同（回滚后的正常状态，或配置漂移）"
+            fi
+        fi
+    else
+        bad_inc "config/dataset 缺失"
+    fi
+    echo ""
+
+    # 2) world 配置 vs 实际 world
+    echo "[2] 包集"
+    _world_tmp=
+    trap '[ -z "$_world_tmp" ] || rm -rf -- "$_world_tmp"' EXIT
+    _world_read=0
+    if _compare_world; then
+        _world_read=1
+        if [ -s "$_world_tmp/missing" ]; then
+            bad_inc "有效 world 缺少声明包：$(tr '\n' ' ' < "$_world_tmp/missing")"
+        fi
+        if [ -s "$_world_tmp/extra" ]; then
+            bad_inc "有效 world 含未声明包：$(tr '\n' ' ' < "$_world_tmp/extra")"
+        fi
+        if [ ! -s "$_world_tmp/missing" ] && [ ! -s "$_world_tmp/extra" ]; then
+            ok "有效 world 与声明一致"
+        fi
+    else
+        skip_inc "无法比对有效 world（声明或 Portage 选择不可读）"
+    fi
+    echo ""
+
+    # 3) 禁入清单 vs world（防 Portage/Flatpak 越界）
+    #    条目以 /* 结尾时按类目前缀匹配（如 app-editors/* = 整类编辑器禁入）；
+    #    其余精确 atom 比对（awk 字面量，与 doctor 第 8 项同一口径）。
+    echo "[3] 应用层边界"
+    if [ -r "$CONF_DIR/forbidden-world" ] && [ "$_world_read" -eq 1 ]; then
+        _viol=0
+        while IFS= read -r _pkg; do
+            case "$_pkg" in ''|\#*) continue ;; esac
+            if awk -v a="$_pkg" '
+                function norm(x) {
+                    sub(/[[:space:]]*#.*/, "", x); sub(/^[[:space:]]+/, "", x)
+                    sub(/[[:space:]]+$/, "", x)
+                    sub(/::.*/, "", x); sub(/:[^/]*$/, "", x)
+                    return x
+                }
+                {
+                    b = norm($0)
+                    if (a ~ /\/\*$/) { c = a; sub(/\/\*$/, "", c); if (index(b, c "/") == 1) f = 1 }
+                    else if (b == a) f = 1
+                }
+                END { exit !f }
+            ' "$_world_tmp/selected" 2>/dev/null; then
+                bad_inc "world 含应用级包：${_pkg}（应走 Flatpak）"
+                _viol=1
+            fi
+        done < "$CONF_DIR/forbidden-world"
+        [ "$_viol" = 0 ] && ok "world 无应用级大件"
+    elif [ ! -r "$CONF_DIR/forbidden-world" ]; then
+        skip_inc "缺少 config/forbidden-world，无法检查应用层边界"
+    else
+        skip_inc "无法检查应用层边界（/var/lib/portage/world 不可读；不是通过）"
+    fi
+    echo ""
+
+    # 4) 桌面外观（Noctalia 全家桶）
+    echo "[4] 桌面外观"
+    # 用 doas/sudo 跑时 $HOME=/root，但桌面配置在真实用户家目录。
+    # doas 设 DOAS_USER，sudo 设 SUDO_USER；优先取它们，否则退回当前 $HOME。
+    _real_home="${HOME:-}"
+    _invoker="${DOAS_USER:-${SUDO_USER:-}}"
+    if [ -n "$_invoker" ] && [ "$_invoker" != "root" ]; then
+        _h=$(getent passwd "$_invoker" 2>/dev/null | cut -d: -f6)
+        [ -n "$_h" ] && _real_home="$_h"
+    fi
+    _cfgdir="${XDG_CONFIG_HOME:-}"
+    if [ -z "$_cfgdir" ] && [ -n "$_real_home" ]; then
+        _cfgdir="$_real_home/.config"
+    fi
+
+    # 4b) Umbriel 配置有效性
+    if ! command -v umbriel >/dev/null 2>&1; then
+        skip_inc "umbriel 命令不可用，跳过配置语法检查（不是通过）"
+    elif [ -z "$_cfgdir" ]; then
+        skip_inc "无法确定桌面配置目录，跳过 Umbriel 配置语法检查（不是通过）"
+    elif [ ! -f "$_cfgdir/umbriel/config.toml" ]; then
+        skip_inc "未部署 $_cfgdir/umbriel/config.toml（不是通过）"
+    elif XDG_CONFIG_HOME="$_cfgdir" umbriel config validate >/dev/null 2>&1; then
+        ok "Umbriel 配置有效"
+    else
+        bad_inc "Umbriel 配置无效（umbriel config validate 失败）"
+    fi
+
+    # 4c) 关键组件存活
+    # 只在「确实处在 Umbriel 会话里」时判组件存活，否则整段 skip。
+    # 旧写法在 SSH/开发机上会报一串「未运行」，把噪声当问题。
+    if ! pgrep -x umbriel >/dev/null 2>&1; then
+        skip_inc "Umbriel 未运行（非图形会话），跳过组件存活检查"
+    else
+        if ! pgrep -x noctalia >/dev/null 2>&1; then
+            bad_inc "Noctalia Shell 未运行（顶栏/启动器/锁屏全部不可用）"
+        else
+            ok "Noctalia Shell 运行中"
+        fi
+        pgrep -x fcitx5 >/dev/null 2>&1 || warn_inc "fcitx5 未运行"
+    fi
+    echo ""
+
+    # 5) 输入法
+    echo "[5] 输入法"
+    if ! pgrep -x umbriel >/dev/null 2>&1; then
+        skip_inc "非图形会话，跳过输入法检查"
+    elif pgrep -x fcitx5 >/dev/null 2>&1; then
+        ok "fcitx5 运行中"
+    elif pgrep -x ibus-daemon >/dev/null 2>&1; then
+        bad_inc "ibus 在运行（本项目唯一路径是 fcitx5；ibus 是历史遗留）"
+    else
+        bad_inc "无输入法守护进程（中文输入不可用）"
+    fi
+
+    echo ""
+    if [ "$n_bad" -gt 0 ]; then
+        printf '\033[31m✘ %d 个问题\033[0m（另有 %d 个警告）\n' "$n_bad" "$n_warn"
+        exit "$ORDO_EXIT_BAD"
+    elif [ "$n_skip" -gt 0 ]; then
+        printf '\033[36m? %d 项无法判定\033[0m（另有 %d 个警告）—— 不计为通过\n' "$n_skip" "$n_warn"
+        exit "$ORDO_EXIT_UNKNOWN"
+    elif [ "$n_warn" -gt 0 ]; then
+        printf '\033[33m! %d 个警告\033[0m\n' "$n_warn"
+        exit "$ORDO_EXIT_OK"
+    else
+        printf '\033[32m✔ 配置与系统完全一致\033[0m\n'
+        exit "$ORDO_EXIT_OK"
+    fi
+}
+
+# ---------- apply ----------
+# 【P0-4 修复】旧版 apply 永远不可能成功：
+#   - `kde` 分支指向已删除的 config/kde/scripts/apply.sh
+#   - `world` 分支 if/else 两个出口都是 exit 1
+#   - `all` 转发到 `kde`
+# 而 AGENTS.md 说 apply 是「改任何东西的唯一路径」。没有写路径 = 声明层退化
+# 成只读文档。现在每个模块都有一条真实可执行的路径。
+_apply_world() {
+    _set_dir=${_ordo_set%/*}
+    _set_file=$_ordo_set
+    if [ -d "$_set_file" ] || [ -L "$_set_file" ]; then
+        bad "包集目标必须为普通文件：$_set_file"
+        return 1
+    fi
+    mkdir -p "$_set_dir" || { bad "无法创建 ${_set_dir}（需要 root）"; return 1; }
+    _tmp=$(mktemp "$_set_dir/.ordo-core.XXXXXX") || { bad "无法创建临时文件"; return 1; }
+    if ! _declared_world > "$_tmp"; then
+        rm -f "$_tmp"
+        bad "无法解析当前平台的包集声明"
+        return 1
+    fi
+    if [ ! -s "$_tmp" ]; then
+        rm -f "$_tmp"
+        bad "config/world 解析后为空（检查文件内容）"
+        return 1
+    fi
+    if cmp -s "$_tmp" "$_set_file" 2>/dev/null; then
+        rm -f "$_tmp"
+        ok "$_set_file 已是最新（$(wc -l < "$_set_file" | tr -d ' ') 个 atom）"
+        info "安装或更新声明包：doas emerge --noreplace @ordo-core"
+        return 0
+    fi
+    if ! chmod 644 "$_tmp" || ! mv -f "$_tmp" "$_set_file"; then
+        rm -f "$_tmp"
+        bad "无法写入 $_set_file"
+        return 1
+    fi
+    ok "已写入 ${_set_file}（$(wc -l < "$_set_file" | tr -d ' ') 个 atom）"
+    info "安装或更新声明包：doas emerge --noreplace @ordo-core"
+    return 0
+}
+
+_apply_theme() {
+    # 配色由 Noctalia 从壁纸提取（theme.source = "wallpaper"），
+    # 没有需要派生的东西。保留子命令是为了兼容既有调用，不再做事。
+    say "配色由 Noctalia 从壁纸提取，无需派生"
+    return 0
+}
+
+_apply_desktop() {
+    # 把 config/desktop 的桌面资产部署到真实用户家目录。
+    # 用符号链接：改仓库文件即等于改生效配置，只有一份文件，没有副本。
+    _src="$CONF_DIR/desktop"
+    [ -d "$_src" ] || { bad "找不到 $CONF_DIR/desktop"; return 1; }
+
+    _real_home="$HOME"
+    _invoker="${DOAS_USER:-${SUDO_USER:-}}"
+    if [ -n "$_invoker" ] && [ "$_invoker" != "root" ]; then
+        _h=$(getent passwd "$_invoker" 2>/dev/null | cut -d: -f6)
+        [ -n "$_h" ] && _real_home="$_h"
+    fi
+    _cfgdir="${XDG_CONFIG_HOME:-$_real_home/.config}"
+
+    _n=0
+    _failed=0
+    for _pair in "skel/.config/wezterm/wezterm.lua:wezterm/wezterm.lua" \
+                 "skel/.config/starship.toml:starship.toml" \
+                 "umbriel/config.toml:umbriel/config.toml" \
+                 "noctalia/config.toml:noctalia/config.toml" \
+                 "luciole/config.toml:luciole/config.toml" \
+                 "keys.md:ordo/keys.md"; do
+        _s="$_src/${_pair%%:*}"
+        _d="$_cfgdir/${_pair##*:}"
+        if [ ! -f "$_s" ]; then
+            bad "源文件不存在：$_s"
+            _failed=1
+        elif { [ -d "$_d" ] && [ ! -L "$_d" ]; } ||
+             ! mkdir -p "$(dirname "$_d")" || ! ln -sfn "$_s" "$_d"; then
+            bad "创建软链失败：$_d"
+            _failed=1
+        else
+            info "${_pair##*:} -> $_s"
+            _n=$((_n + 1))
+        fi
+    done
+    [ "$_failed" -eq 0 ] || return 1
+    ok "已链接 ${_n} 个桌面配置文件到 $_cfgdir"
+
+}
+
+cmd_apply() {
+    _module="${1:-all}"
+    case "$_module" in
+        world)   _apply_world ;;
+        theme)   _apply_theme ;;
+        desktop) _apply_desktop ;;
+        all)
+            _rc=0
+            say "应用包集"
+            _apply_world || _rc=1
+            echo ""
+            say "应用桌面外观"
+            _apply_theme || _rc=1
+            echo ""
+            say "部署桌面配置"
+            _apply_desktop || _rc=1
+            return "$_rc"
+            ;;
+        *)
+            bad "未知模块：${_module}（可选：world | theme | desktop | all）"
+            return 1
+            ;;
+    esac
+}
+
+# ---------- diff ----------
+cmd_diff() {
+    say "仓库配置 vs 系统实际状态"
+    echo ""
+    _world_tmp=
+    trap '[ -z "$_world_tmp" ] || rm -rf -- "$_world_tmp"' EXIT
+    if _compare_world; then
+        echo "--- world 差异（< 仓库有，> 系统有）："
+        sed 's/^/< /' "$_world_tmp/missing"
+        sed 's/^/> /' "$_world_tmp/extra"
+    else
+        skip_inc "无法对比有效 world"
+    fi
+    echo ""
+    echo "--- dataset 差异："
+    if [ -r "$CONF_DIR/dataset" ]; then
+        info "配置："
+        grep -E '^POOL=|^DATASET=|^HOME_DATASET=' "$CONF_DIR/dataset" | sed 's/^/    /'
+        info "系统："
+        # 【修】旧版从不 source dataset，主 shell 里 POOL 未定义 → 恒显示 ?。
+        # 现在 lib.sh 已加载 dataset，POOL/DATASET 可用。
+        printf '    POOL=%s\n' "${POOL:-?}"
+        printf '    DATASET=%s\n' "${DATASET:-?}"
+        if command -v findmnt >/dev/null 2>&1; then
+            printf '    RUNNING_ROOT=%s\n' "$(findmnt -no SOURCE / 2>/dev/null || printf '?')"
+        else
+            printf '    RUNNING_ROOT=?（findmnt 不可用）\n'
+        fi
+    fi
+}
+
+# ---------- path ----------
+cmd_path() {
+    echo "$CONF_DIR"
+}
+
+# ---------- 主流程 ----------
+case "${1:-show}" in
+    show)   cmd_show ;;
+    verify) cmd_verify ;;
+    apply)  shift; cmd_apply "$@" ;;
+    diff)   cmd_diff ;;
+    path)   cmd_path ;;
+    -h|--help|help)
+        cat <<EOF
+ordo config — OneConfig 统一配置入口（ADR 0008）
+
+用法: ordo config <动作>
+
+动作:
+  show                显示当前生效的完整配置（只读）
+  verify              检查配置与实际系统的漂移
+  apply <模块>        应用配置：world（包集→Portage set）| theme（配色）|
+                      desktop（部署 Umbriel/Noctalia 配置）| all
+  diff                对比仓库配置与系统实际状态
+  path                显示配置仓库位置
+
+退出码: 0 全绿 | 1 有漂移/失败 | 2 无法判定
+
+配置仓库：${CONF_DIR}
+规则：所有配置只有一个定义处（config/），其他地方只能引用。
+EOF
+        ;;
+    *)
+        echo "未知动作：$1（试 ordo config --help）" >&2
+        exit "$ORDO_EXIT_BAD"
+        ;;
+esac

@@ -1,0 +1,29 @@
+# Ordo — greetd 配置
+#
+# greetd 是登录守护进程，Noctalia Greeter 是它的图形前端。
+# 二者分离：换 greeter 不需要换 greetd。
+#
+# 为什么用 Noctalia Greeter：
+#   它是 Noctalia 全家桶的一部分，与桌面共用同一套壁纸、调色板和字体，
+#   从开机第一屏就是一致的视觉。自带 wlroots 合成器，零 Qt/GTK 依赖。
+#
+# 为什么不用 SDDM：
+#   SDDM 依赖 Qt6 全家桶（实测连带 13 个 dev-qt 包、26 MB 库），
+#   且自定义主题需要维护 618 行 QML。
+
+[terminal]
+# greetd 独占 tty1。该 VT 上的 getty 由 install.sh 从 inittab 移除；
+# 两者同时存在会争抢键盘，表现为输入错乱与登录框重影。
+vt = 1
+
+[default_session]
+# Noctalia Greeter 的会话包装脚本。它内部会启动自带的 wlroots 合成器
+# （noctalia-greeter-compositor），再把 greeter 作为 Wayland 客户端跑在里面。
+#
+# 不要改成 noctalia-greeter：那是客户端本身，需要已有合成器才能运行。
+command = "/usr/bin/noctalia-greeter-session"
+
+# 用 greetd 用户而非上游文档的 greeter：
+# GURU 的 noctalia-greeter-9999 只装了 tmpfiles.d 配置，没有创建 greeter 用户。
+# greetd 用户已在 video/input 组（见 greetd.initd 的说明），权限足够。
+user = "greetd"

@@ -1,0 +1,29 @@
+#!/bin/sh
+# Exit 1 for an unsafe setting and 2 when the required facts are missing.
+set -eu
+
+case "$1" in
+    jobs)
+        cpus=$(nproc) || exit 2
+        case "$cpus" in ''|*[!0-9]*|0) exit 2 ;; esac
+        printf '%s\n' "$2" | awk -v cpus="$cpus" '
+            {
+                for (i=1; i<=NF; i++) {
+                    if ($i == "-j" || $i == "--jobs") jobs=$(++i)
+                    else if ($i ~ /^-j/) jobs=substr($i,3)
+                    else if ($i ~ /^--jobs=/) jobs=substr($i,8)
+                    else continue
+                    found=1
+                    if (jobs !~ /^[0-9]+$/ || jobs+0 < 1 || jobs+0 > cpus) unsafe=1
+                }
+            }
+            END { if (unsafe) exit 1; if (!found) exit 2 }
+        '
+        ;;
+    arc)
+        value=$(cat /sys/module/zfs/parameters/zfs_arc_max) || exit 2
+        case "$value" in ''|*[!0-9]*) exit 2 ;; esac
+        [ "$value" -gt 0 ]
+        ;;
+    *) exit 2 ;;
+esac

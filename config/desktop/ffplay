@@ -1,0 +1,38 @@
+#!/bin/sh
+# Ordo 的 ffplay 替身（偏离登记 #65）
+#
+# 为什么存在：pomodoro 插件在 plugin.toml 里声明 dependencies = ["ffplay"]，
+# Noctalia 据此在依赖缺失时跳过 bar widget 实例化。而 ffplay 属 ffmpeg 的
+# sdl USE，sdl → libsdl2 → libdecor → GTK3 链条与 thin 公理冲突
+# （package.use/desktop 已审计 -sdl，不推翻）。
+#
+# 实际调用面：插件默认走 noctalia 原生音效 API（sounds.luau → sound.play），
+# 只有 use-bundled-alarm-sound = true 才 spawn：
+#   ffplay -nodisp -autoexit -loglevel quiet '<file>'
+# 另有依赖探测（-version）。这里剥掉 ffplay 专属 flag，转给 pw-play。
+#
+# 部署：install.sh → /usr/local/bin/ffplay
+case "${1-}" in
+    -version | --version)
+        echo "ffplay version 7.1.1 (Ordo shim: pw-play backend)"
+        exit 0 ;;
+esac
+
+_args=
+_skip_next=0
+for _a in "$@"; do
+    if [ "$_skip_next" -eq 1 ]; then
+        _skip_next=0
+        continue
+    fi
+    case "$_a" in
+        -nodisp | -autoexit | -hide_banner | -nostats) ;;
+        -loglevel)
+            _skip_next=1 ;;
+        -loglevel*) ;;
+        *)
+            _args="$_args '$_a'" ;;
+    esac
+done
+
+eval exec pw-play $_args

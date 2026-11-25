@@ -1,0 +1,75 @@
+# 桌面外壳相关包的 USE 调整
+# 原则：去掉 systemd 依赖，保留 elogind
+#
+# 【规则】每行一个包，**必须**紧跟一行注释说明原因（AGENTS.md 硬性要求）。
+#         没有理由的 USE 调整 = 无法审计的隐式行为。
+
+# 会话/权限：niri 不自己管会话，靠 elogind 提供 logind 语义（无 systemd）
+sys-auth/elogind              pam policykit
+#   pam：让用户会话在登录时被 elogind 接管（否则 XDG_RUNTIME_DIR 不建）
+#   policykit：授权对话框走后端
+
+# 网络 / 电源：去掉 systemd 依赖
+net-misc/networkmanager       -systemd elogind
+#   -systemd：NetworkManager 的 systemd 集成（我们不用）
+#   elogind：改用 elogind 的会话 API
+sys-power/upower              elogind
+#   elogind：同上，电池/电源事件走 elogind
+
+# Flatpak / portal：去掉 systemd 集成
+sys-apps/flatpak              -systemd
+#   -systemd：flatpak 的 systemd unit 生成（OpenRC 下由 cron.monthly 接管更新）
+sys-apps/xdg-desktop-portal   -systemd
+#   -systemd：portal 的 systemd 服务激活（我们靠会话脚本显式启动）
+
+# 字体：中文开箱
+media-fonts/noto-cjk          cjk
+#   cjk：装 CJK 字形（否则只有拉丁）
+
+# 依赖解析要求的显式 USE（VM 实测提取）
+net-libs/ngtcp2                   gnutls
+#   gnutls：HTTP/3 后端，curl 依赖链要求
+sys-kernel/installkernel          dracut
+#   dracut：内核安装时用 dracut 生成 initramfs（BE 模型必需）
+
+# 关闭 gold-LTO 插件：栈内无人使用，它会把每个 llvm slot
+# 都拖上对应的 llvmgold → 平白多编一整条 llvm（VM 实测教训）
+llvm-core/llvm                    -binutils-plugin
+#   -binutils-plugin：不编 llvmgold（省 1-2 小时）
+
+# zfs 2.4.4 单包内置模块（VM 实测）；不要 dist-kernel USE（它会要求独立 kmod）
+sys-fs/zfs                       modules
+#   modules：编译内核模块（zfs 2.4.x 起内置，不再需要 zfs-kmod 包）
+# ZBM 生成 EFI 需要 UEFI stub（systemd-utils 的 boot 提供；boot 依赖 kernel-install）
+sys-apps/systemd-utils           boot kernel-install
+#   boot：提供 UEFI stub（ZFSBootMenu 的 EFI 本体需要）
+#   kernel-install：boot 的依赖
+#   ⚠ 注意：这不违反「无 systemd」——它只是 systemd 项目的工具集，
+#     不安装 PID1。doctor 判 systemd 用的是 /proc/1/comm 而非命令存在性。
+
+# ffmpeg：关闭 sdl USE（sdl USE 引入 media-libs/libsdl2 → libdecor → GTK3；
+#   代价：没有 ffplay——由 config/desktop/ffplay 替身补位，ffmpeg 转码不受影响）
+media-video/ffmpeg                -sdl
+#   -sdl：掐断 libsdl2 → libdecor → GTK3 链条（偏离 #59 的未完成项）
+
+# ffmpegthumbnailer：关闭 gtk USE（gtk USE 引入 dev-libs/glib 的 GTK 集成，
+#   缩略图只需要输出 JPEG）
+media-video/ffmpegthumbnailer     -gtk
+#   -gtk：yazi/缩略图路径不碰 GTK3
+
+# wpa_supplicant：关闭 gui USE（gui USE 编译 wpa_gui，依赖 dev-qt/qtbase 与
+#   qtsvg —— 为一个小工具引入 Qt 不划算；WiFi 由 NetworkManager 管理）
+net-wireless/wpa_supplicant       -gui
+#   -gui：见偏离 #58
+
+# rfkill 不是独立包 —— 它由 util-linux 的 USE flag 提供 /usr/bin/rfkill。
+# （曾是 config/world 里的 net-wireless/rfkill，那个包在 Gentoo 树里不存在）
+sys-apps/util-linux              rfkill
+#   rfkill：提供 /usr/bin/rfkill（无线开关诊断）
+
+# pipewire：开 extra 提供 pw-play / pw-cat 等小工具
+#   番茄钟插件声明 ffplay 依赖，ffplay 替身（config/desktop/ffplay，偏离 #65）
+#   最终转调 pw-play；不开 extra 时 pw-play 不存在，替身 exec 失败 →
+#   插件依赖判定仍缺失，bar widget 不实例化。
+media-video/pipewire             extra
+#   extra：pw-play/pw-cat（无 SDL，不碰 GTK3 链条）

@@ -1,0 +1,108 @@
+#!/bin/sh
+# ordo — 统一入口（宪法"一个入口"；永远是委托层：规则在工具里，编排只在这里）
+# 子命令: sysup | snap | backup | config | app | doctor | selfcheck | info
+#
+# 【为什么每个子命令都走 _dispatch 而不是裸 exec "$(dirname "$0")/x"】
+#   本脚本被 install.sh 软链到 /usr/local/bin/ordo。裸 dirname "$0"
+#   在软链下解析为 /usr/local/bin —— 那里只有软链本身，没有 sysup/snap/...。
+#   所以必须先把 $0 解软链（readlink -f），再拼兄弟脚本路径。
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+ORDO_SELF_NAME="$(basename "$_self")"
+export ORDO_SELF_NAME
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+PROG="$ORDO_SELF_NAME"
+# 版本单一来源：根目录 version 文件（install.sh / docs / os-release 都引用它）
+VERSION="$(cat "$ORDO_ROOT/version" 2>/dev/null || printf 'unknown')"
+
+usage() {
+    cat <<EOF
+$PROG $VERSION — ZFS 原生、可回滚、Flatpak 优先的 Gentoo 桌面系统
+
+用法: $PROG <命令> [参数]
+
+命令:
+  sysup [--no-snapshot]   快照 → 升级 → 失败中止并给出回滚路径
+  snap <动作>              快照管理：list/create/delete/rollback/auto/identity
+  backup <动作>            备份管理：send/list/verify/status（zfs send 到池外）
+  config <动作>            统一配置入口（ADR 0008）：show/verify/apply/diff/path
+  migrate [--pending]     运行 config/migrations 中尚未执行的迁移
+  app install <id>        安装 Flatpak 应用（等价 flatpak install flathub <id>）
+  app list                已安装的 Flatpak 应用
+  doctor                  检查系统漂移（配置/快照/服务）
+  selfcheck               自检：usage 表 × case 分发 × 安装软链 三者是否一致
+  info                    版本与环境信息
+
+退出码: 0 全绿 | 1 有问题 | 2 无法判定
+EOF
+}
+
+# 分发到兄弟脚本；找不到时给明确错误（而不是 sh 的 "No such file"）
+_dispatch() {
+    _target="$_dir/$1"
+    shift
+    if [ ! -x "$_target" ]; then
+        printf '\033[1;31m!!\033[0m 找不到可执行脚本 %s\n' "$_target" >&2
+        printf '   修复：确认 scripts/ 完整安装到 %s\n' "$_dir" >&2
+        exit "$ORDO_EXIT_BAD"
+    fi
+    exec "$_target" "$@"
+}
+
+cmd="${1:-}"; [ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+    sysup)
+        require_root "$PROG sysup $*"
+        _dispatch sysup "$@"
+        ;;
+    rollback)
+        # 旧的 rollback 子命令已废弃：它的守卫（检查 DATASET 是否 mounted）
+        # 在回滚后返回 no 会误放行，去回滚一个用户根本不在上面运行的数据集。
+        # 现在统一委托给 ordo-snap，那里用 RUNNING_ROOT 做对象识别。
+        printf "注意：'ordo rollback' 已并入 'ordo snap rollback'（更安全的 clone+promote+切 bootfs）\n" >&2
+        printf "Note: 'ordo rollback' is now 'ordo snap rollback'\n" >&2
+        _dispatch ordo-snap rollback "$@"
+        ;;
+    app)
+        sub="${1:-}"; [ $# -gt 0 ] && shift || true
+        case "$sub" in
+            install)
+                command -v flatpak >/dev/null 2>&1 \
+                    || ordo_die "flatpak 未安装（sys-apps/flatpak 应由 config/world 提供）"
+                flatpak install --user --noninteractive flathub "$@" ;;
+            list)
+                command -v flatpak >/dev/null 2>&1 \
+                    || ordo_die "flatpak 未安装（sys-apps/flatpak 应由 config/world 提供）"
+                flatpak list --user --app --columns=application,version ;;
+            *) usage; exit "$ORDO_EXIT_BAD" ;;
+        esac
+        ;;
+    snap)     _dispatch ordo-snap "$@" ;;
+    backup)   _dispatch ordo-backup "$@" ;;
+    config)   _dispatch ordo-config "$@" ;;
+    migrate)  _dispatch ordo-migrate "$@" ;;
+    doctor)   _dispatch doctor "$@" ;;
+    selfcheck) _dispatch ordo-selfcheck "$@" ;;
+    info)
+        printf 'ordo %s\n' "$VERSION"
+        printf 'dataset: %s（pool=%s，home=%s）\n' "$DATASET" "$POOL" "$HOME_DATASET"
+        printf 'running: %s\n' "$RUNNING_ROOT"
+        if is_rolled_back_env; then
+            printf 'identity: 非规范数据集（回滚后的 clone）\n'
+        fi
+        printf 'init:    %s\n' "$(command -v openrc-run >/dev/null 2>&1 && echo openrc || echo unknown)"
+        if command -v zfs >/dev/null 2>&1; then
+            printf 'zfs:     %s\n' "$(zfs version 2>/dev/null | head -1)"
+        else
+            printf 'zfs:     未安装\n'
+        fi
+        printf 'kernel:  %s\n' "$(uname -r)"
+        printf 'desktop: %s\n' "${XDG_CURRENT_DESKTOP:-unknown}"
+        ;;
+    ""|-h|--help|help) usage ;;
+    *) usage; exit "$ORDO_EXIT_BAD" ;;
+esac

@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+mode=${1:---apply}
+case "$mode" in --check|--apply) ;; *) exit 1;; esac
+boot=/dev/disk/by-partuuid/@BOOT_ID@
+root=/dev/disk/by-partuuid/@ROOT_ID@
+ready() { [ -b "$boot" ] && [ -b "$root" ]; }
+seconds=0
+while ! ready && [ "$seconds" -lt 45 ]; do
+    sleep 1
+    seconds=$((seconds + 1))
+done
+if ! ready; then
+    dmesg | grep -Ei 'dwc3|xhci|tps659|cd321|atcphy|usb [0-9]|usb-storage|uas |scsi host' | tail -16 || :
+    if command -v lsusb >/dev/null; then lsusb -t || :; fi
+    for role in /sys/class/typec/port*/data_role; do
+        [ -r "$role" ] && printf '%s: %s\n' "$role" "$(cat "$role")"
+    done
+    lsblk -o NAME,SIZE,TRAN,FSTYPE,LABEL,PARTUUID
+    echo "Installer partitions missing after 45s. Try a direct USB connection or another port."
+    echo "At the livecd prompt, retry: ordo-install --check"
+    exit 1
+fi
+exec /bin/sh /ordo-engine "$mode" @BOOT_ID@ @ROOT_ID@

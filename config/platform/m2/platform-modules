@@ -1,0 +1,17 @@
+apple-dart
+apple-sart
+pcie-apple
+pinctrl-apple-gpio
+pwm-apple
+i2c-pasemi-platform
+macsmc
+gpio-macsmc
+mux-apple-display-crossbar
+phy-apple-atc
+tps6598x
+dwc3-apple
+spi-apple
+spi-hid-apple-of
+hid-apple
+nvme-apple
+dockchannel-hid

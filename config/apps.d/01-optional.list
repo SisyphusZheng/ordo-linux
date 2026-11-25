@@ -1,0 +1,9 @@
+# Ordo 可选应用清单 —— 装了更好用，但不装也能干活
+#
+# 只由 `ordo app install <id>` 按需安装；install.sh 不自动装这一组。
+# 保留在仓里的理由：它是"Ordo 推荐应用"的唯一定义处，文档从这里派生。
+com.google.Chrome            # 需要 Widevine（Netflix/银行）时的备选浏览器
+org.libreoffice.LibreOffice  # 办公套件
+org.telegram.desktop         # IM
+com.visualstudio.code        # 编辑器（AGENTS.md：编辑器一律 Flatpak）
+org.gimp.GIMP                # 图像处理
