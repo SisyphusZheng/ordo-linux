@@ -14,7 +14,9 @@ qemu-img convert -f raw -O qcow2 -c \
 python3 dev/vm/utm.py 'Ordo Linux 0.1.0 (ARM64).utm' --version 0.1.0
 disk_hash=$(sha256sum 'Ordo Linux 0.1.0 (ARM64).utm/Data/Ordo.qcow2' | cut -d' ' -f1)
 python3 dev/vm/zip-bundle.py 'Ordo Linux 0.1.0 (ARM64).utm' \
-    'Ordo Linux 0.1.0 ARM64.utm.zip' --qcow2-sha256 "$disk_hash"
+    'Ordo-Linux-0.1.0-UTM-arm64.zip' --qcow2-sha256 "$disk_hash"
 ```
 
-发布前，从写时复制磁盘冷启动，核对 UEFI、OpenRC、本地密码设置与 Wayland 桌面；发布镜像保持首次启动状态。
+`zip-bundle.py` 会在 ZIP 同目录写出 `UTM-SHA256SUMS`（ZIP 的 SHA-256），随 ZIP 一起发布。
+
+制盘时会将仓库中固定的 Luciole 配方和 Manifest 安装到基座的 local Portage overlay。发布前，从写时复制磁盘冷启动，核对 UEFI、OpenRC、本地密码设置与 Wayland 桌面；发布镜像保持首次启动状态。

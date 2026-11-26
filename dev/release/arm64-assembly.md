@@ -11,6 +11,8 @@
 5. 对 `/etc` 做完整的 quickpkg 占位行扫描。用同版本包的源码与 ebuild 配置恢复默认文件。也可以从可信的同版本安装或公开包中恢复与原始 GPKG `metadata/CONTENTS` 中路径和摘要完全一致的文件。只通过字节精确的占位匹配写入，用原始包记录核对实际版本、来源和模式。Greetd PAM 由 `greetd-0.10.3-r1.ebuild` 的 `newpamd` 段生成，Greetd 会话配置使用仓库声明。SysV init 表使用官方干净 stage3 的 OpenRC 默认表。ZFSBootMenu 使用 3.1.0 发行源中的 `etc/zfsbootmenu/config.yaml`。再次扫描，要求占位归零。
 6. 将 `config/`、`scripts/`、`assets/` 和 `version` 部署到目标 `/opt/ordo`。给 Gentoo 主树配置正常官方 rsync 与 MetaManifest 验证，保留 GURU 和本地 overlay 的固定版本。移除构建期间生成的默认 initramfs、机器 ID、hostid、池缓存、SSH 主机密钥和 root 历史，锁定 root，检查没有已创建的普通用户和 home 内容。检查 Umbriel、Noctalia、Luciole 和 greetd 可执行且库依赖完整。此根可作为 ARM64 虚拟机的输入。
 
+首次合并前按 `config/desktop/keyring-policy.sh configure` 部署本地 libsecret 配方和 Portage 配置。用已校验的源代码为 `app-crypt/libsecret::local` 和 `app-crypt/pinentry[-gtk,-keyring,ncurses]` 构建 ARM64 GPKG，放进离线缓存并更新索引。底座若含有旧 GNOME Keyring，合并这两个包后运行 `keyring-policy.sh remove`。封装前和原生包合并后运行 `keyring-policy.sh check`。Gentoo stage3 预装的包也在检查范围内。
+
 ## M2 Live、根分片和制盘
 
 M2 根从共用根另作一份副本。通过正常 Portage 合并补齐 UPower 1.91.3、power-profiles-daemon 0.30-r1 与 i2c-tools 4.4。源码压缩包须和所用 Gentoo Manifest 的 SHA-512 吻合。在根内检查 `repair-package-defaults.py --check` 与实际 OpenRC 服务文件。安装过程会在外接盘新建用户并写入该 Mac 的固件与每盘 hostid。

@@ -2,20 +2,18 @@ Ordo Linux — 许可
 
 本仓库不采用单一许可证。按内容类型划分：
 
-  原创代码（install.sh、scripts/、dev/、overlay/、tests/、Makefile、.github/）
+  代码（install.sh、scripts/、tests/、Makefile、.github/）
        GNU General Public License v2.0 or later (GPL-2.0-or-later)
 
   系统定义（config/）
        GNU General Public License v2.0 or later (GPL-2.0-or-later)
        第三方 M2 软件包默认配置沿用其原始许可，见 config/platform/m2/package-defaults/README.md
 
-  原创文档（含各目录中的 Markdown 手册）
+  文档（docs/）
        Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
 
-  原创品牌素材和壁纸（assets/branding/、config/desktop/wallpapers/ 中的图像）
+  品牌素材（assets/branding/）
        Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
-
-第三方代码、配置和补丁所涉及的上游内容保留原许可和署名。
 
 完整文本随仓分发（GPL 要求）：
   licenses/GPL-2.0.txt

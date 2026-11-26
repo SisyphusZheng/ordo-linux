@@ -31,6 +31,12 @@ case "$ORDO_PLATFORM" in
         ;;
     *) die "ORDO_PLATFORM 必须是 vm 或 bare-metal" ;;
 esac
+# 架构与平台必须自洽：config/world.bare-metal.$ARCH 是微码 vendor 的分片，
+# arm64 真机不该出现 x86 微码（P2-11）。未知架构在 config/arch 里已 exit 1。
+case "$ARCH" in
+    arm64|amd64) ;;
+    *) die "config/arch 给出的 ARCH 非法：${ARCH:-空}" ;;
+esac
 ORDO_LAYOUT_ONLY="${ORDO_LAYOUT_ONLY:-0}"
 case "$ORDO_LAYOUT_ONLY" in 0|1) ;; *) die "ORDO_LAYOUT_ONLY 必须是 0 或 1" ;; esac
 
@@ -45,7 +51,14 @@ TARGET="$(realpath -m "$TARGET")"
 for tool in parted mkfs.vfat partprobe zpool zfs zgenhostid curl gpg sha256sum tar chroot nproc findmnt mountpoint lsblk realpath install; do
     command -v "$tool" >/dev/null 2>&1 || die "Live 环境缺少依赖：$tool"
 done
-[ -r "$REPO_DIR/overlay/gui-apps/luciole/luciole-0.1.0.ebuild" ] || die "缺少 Luciole overlay"
+# Luciole 的 ebuild 名带版本号（升级只需换文件名）：按 glob 校验，
+# 不在安装器里钉死 luciole-0.1.0（P2-11）。
+luciole_ebuild=''
+for _luciole_eb in "$REPO_DIR"/overlay/gui-apps/luciole/*.ebuild; do
+    [ -f "$_luciole_eb" ] || continue
+    luciole_ebuild=$_luciole_eb
+done
+[ -n "$luciole_ebuild" ] || die "缺少 Luciole overlay（overlay/gui-apps/luciole/*.ebuild）"
 if [ "$ORDO_LAYOUT_ONLY" = 0 ]; then
     jobs=$(sed -n 's/^MAKEOPTS="\(.*\)"$/\1/p' "$REPO_DIR/config/make.conf.example")
     sh "$REPO_DIR/config/check-build" jobs "$jobs" || die "编译并行度预检失败"
@@ -102,7 +115,7 @@ cleanup() {
     rc=$?
     trap - EXIT HUP INT TERM
     if [ "$pool_created" = 1 ]; then
-        for mount_dir in dev sys proc efi; do
+        for mount_dir in dev sys proc run efi; do
             if mountpoint -q "$TARGET/$mount_dir"; then
                 umount -R "$TARGET/$mount_dir" || warn "无法卸载 $TARGET/$mount_dir"
             fi
@@ -186,9 +199,13 @@ for _pu in "$REPO_DIR"/config/package.use/*; do
 done
 cp "$REPO_DIR/config/package.accept_keywords/"* "$TARGET/etc/portage/package.accept_keywords/"
 cp "$REPO_DIR/config/package.mask/"* "$TARGET/etc/portage/package.mask/" 2>/dev/null || true
-sh -c '. "$1/config/world.sh"; ordo_world "$1/config" "$2"' sh "$REPO_DIR" "$ORDO_PLATFORM" \
+sh -c '. "$1/config/world.sh"; ordo_world "$1/config" "$2" "$3"' sh "$REPO_DIR" "$ORDO_PLATFORM" "$ARCH" \
     > "$TARGET/etc/portage/sets/ordo-core"
 [ -s "$TARGET/etc/portage/sets/ordo-core" ] || die "有效包集为空"
+# arm64 不得含 x86 微码：vendor 包按架构分片（config/world.bare-metal.$ARCH）。
+if [ "$ARCH" != amd64 ] && grep -qx 'sys-firmware/intel-microcode' "$TARGET/etc/portage/sets/ordo-core"; then
+    die "arm64 的 @ordo-core 含 x86 微码 —— 检查 config/world.bare-metal 分片"
+fi
 : > "$TARGET/var/lib/portage/world"
 printf '%s\n' '@ordo-core' > "$TARGET/var/lib/portage/world_sets"
 printf '%s\n' "$ORDO_PLATFORM" > "$TARGET/etc/ordo/platform"
@@ -226,13 +243,22 @@ chmod 2775 "$TARGET/var/cache/ccache"
 # fstab：只挂 ESP 到 /efi；ZFS 数据集由 mountpoint 属性 + zfs-mount 服务挂载
 # （不再写 zfs 条目 —— 审查者指出 fstab 的 zfs 行会用不带 zfsutil 的
 #   mount -t zfs，这正是当年被迫改用 legacy 的真正原因）
+# 用 PARTUUID 而不是 $DISK_P1：安装期看到的是 live 环境的盘序，
+# USB 介质占住 sda 时内置盘会变成 sdb，首启 /efi 就挂不上（P2-11）。
+_efi_partuuid=$(lsblk -no PARTUUID "$DISK_P1" | head -1 | tr -d '[:space:]')
+[ -n "$_efi_partuuid" ] || die "无法读取 ESP 的 PARTUUID：$DISK_P1"
 cat > "$TARGET/etc/fstab" <<EOF
-$DISK_P1                 /efi   vfat   defaults   0 0
+PARTUUID=$_efi_partuuid  /efi   vfat   defaults   0 0
 EOF
 
-# pool 缓存写入 BE 文件系统（dracut zfs 模块靠它发现 pool）
+# pool 缓存写入 BE 文件系统（dracut zfs 模块靠它发现 pool）。
+# 两次 zpool set：先用 workdir 里的临时文件拿到 cache 内容，拷进 BE 后
+# 把属性指向 /etc/zfs/zpool.cache —— 旧版停在 $workdir，而 workdir 在
+# 收尾时被 rm -rf，目标机属性指向一个不存在的目录（P2-11）。
 zpool set cachefile="$workdir/zpool.cache" "$POOL"
 install -m 0644 "$workdir/zpool.cache" "$TARGET/etc/zfs/zpool.cache"
+zpool set cachefile=/etc/zfs/zpool.cache "$POOL" \
+    || die "cachefile 属性指向 /etc/zfs/zpool.cache 失败"
 
 # chroot 只读取目标根里暂存的仓库文件。
 if [ "$ORDO_LAYOUT_ONLY" = 0 ]; then
@@ -250,6 +276,11 @@ mount --rbind /sys   "$TARGET/sys"
 mount --make-rslave "$TARGET/sys"
 mount --rbind /dev   "$TARGET/dev"
 mount --make-rslave "$TARGET/dev"
+# chroot 里必须有自己的 /run：OpenRC 的 telinit 走 /run/initctl，
+# 缺它时旧版向 PID 1 发 HUP —— 那会打到 live ISO 的 init（P2-11）。
+mkdir -p "$TARGET/run"
+mount --rbind /run   "$TARGET/run"
+mount --make-rslave "$TARGET/run"
 # 【内核位置】/boot 是数据集内的普通目录，不挂 ESP。
 # ZBM 扫描的是数据集内 /boot 里的 vmlinuz-* 与 initramfs-*.img。
 # 之前挂 ESP 到 /boot 会导致：emerge 更新内核写到 ESP，ZBM 仍读数据集内旧内核。
@@ -294,7 +325,7 @@ emerge -1 --noreplace app-eselect/eselect-repository dev-vcs/git app-arch/unzip
 eselect repository enable guru
 emaint sync -r guru
 
-# Luciole 在 @world 中，必须先注册 overlay 并生成 Manifest。
+# 注册本地桌面配方后再解析 @world。
 mkdir -p /var/db/repos/local
 cp -R "$REPO_DIR"/overlay/metadata "$REPO_DIR"/overlay/profiles \
     "$REPO_DIR"/overlay/gui-apps /var/db/repos/local/
@@ -308,6 +339,7 @@ for _eb in /var/db/repos/local/gui-apps/*/*.ebuild; do
     [ -f "$_eb" ] || die "本地 overlay 缺少 ebuild"
     ebuild "$_eb" manifest || die "生成 Manifest 失败：$_eb"
 done
+sh "$REPO_DIR/config/desktop/keyring-policy.sh" configure
 
 # ---- 2) profile：桌面基线（udev/X/wayland 等 USE 默认值）----
 say "切换 desktop profile → ${PROFILE:-（空！）}"
@@ -360,6 +392,8 @@ done
 [ "$ok" = 1 ] || { echo "!! @world 多轮收敛失败" >&2; exit 1; }
 # 恢复 pillow 的 truetype（freetype 渲染需要），单包重编
 rm -f /etc/portage/package.use/zz-bootstrap-cycle
+sh "$REPO_DIR/config/desktop/keyring-policy.sh" remove
+
 # 破环种子（deviations #3）：只在解决 docutils→pillow→harfbuzz 循环时用一次。
 # 之后 @world 会把 pillow 作为依赖正常装上，故不必进 world。
 emerge -1 dev-python/pillow
@@ -547,15 +581,12 @@ chmod 755 /etc/cron.monthly/zfs-scrub
 # ---- 11b-ter) Flatpak 应用层（宪法"Flatpak-first"；此前 install.sh 完全缺失）----
 # 包本体：sys-apps/flatpak 已在 config/world 基线内 → 由本脚本 §5 的 emerge @world 装上，
 # 这里不再重复 emerge（避免同一包两条安装路径）。
-# 本节只补 emerge 不会替我们做的两件事：Flathub remote + 每周自动更新。
-say "配置 Flatpak + Flathub"
-# remote-add 需要访问公网拉 Flathub 元数据：安装期断网不应让整机安装失败，
-# 失败只警告并打印补做命令（失败要响亮，但不连坐）
-if command -v flatpak >/dev/null 2>&1; then
-    flatpak remote-add --if-not-exists flathub \
-        https://flathub.org/repo/flathub.flatpakrepo \
-        || warn "Flathub remote 添加失败（联网后手动执行：flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo）"
-else
+# 本节只补 emerge 不会替我们做的事：每周自动更新。
+# 【P1-04】Flathub remote 不在这里加：--user 的 remote 与 --user 的应用必须
+# 属于同一个用户（这里以 root 跑，加了只会落到系统仓库，首启的 ordo 看不到）。
+# remote 与清单安装一起做，见 §15。
+say "配置 Flatpak 自动更新"
+if ! command -v flatpak >/dev/null 2>&1; then
     warn "flatpak 命令不存在（@world 应已装 sys-apps/flatpak，核对 config/world 与本轮 emerge）"
 fi
 # 每周自动更新（照 /etc/cron.monthly/zfs-scrub 的写法；cronie 已在 §11b 启用）
@@ -616,7 +647,7 @@ say "安装 ordo CLI"
 if [ -d "$REPO_DIR/scripts" ]; then
     mkdir -p /opt/ordo /etc/ordo
     rm -rf /opt/ordo/scripts /opt/ordo/config
-    cp -r "$REPO_DIR/scripts" "$REPO_DIR/config" /opt/ordo/
+    cp -r "$REPO_DIR/scripts" "$REPO_DIR/config" "$REPO_DIR/overlay" /opt/ordo/
     # 版本文件：ordo / os-release / 文档的唯一来源
     [ -f "$REPO_DIR/version" ] && cp "$REPO_DIR/version" /opt/ordo/version
     [ -f "$REPO_DIR/LICENSE" ] && cp "$REPO_DIR/LICENSE" /opt/ordo/LICENSE
@@ -676,9 +707,9 @@ BUILD_ID=${_ver_base}
 VERSION_ID=${_ver_base}
 VERSION="${_ver_base} (Ab Chao)"
 VERSION_CODENAME=ab-chao
-HOME_URL="https://github.com/SisyphusZheng/ordo-linux"
-SUPPORT_URL="https://github.com/SisyphusZheng/ordo-linux/issues"
-BUG_REPORT_URL="https://github.com/SisyphusZheng/ordo-linux/issues"
+HOME_URL="https://github.com/ordo-linux/ordo"
+SUPPORT_URL="https://github.com/ordo-linux/ordo/issues"
+BUG_REPORT_URL="https://github.com/ordo-linux/ordo/issues"
 OSREL
 ln -sf /etc/os-release /usr/lib/os-release 2>/dev/null || cp /etc/os-release /usr/lib/os-release
 
@@ -730,20 +761,6 @@ if [ -d "$REPO_DIR/assets/branding" ]; then
 ORDOLOGO
     chmod 644 /usr/share/pixmaps/ordo-logo.svg
 
-    # 登录管理器：greetd + Noctalia Greeter（无 GTK/Qt 依赖）
-    if [ -f /opt/ordo/config/desktop/greetd/config.toml ]; then
-        mkdir -p /etc/greetd /etc/tmpfiles.d
-        install -Dm644 /opt/ordo/config/desktop/greetd/config.toml /etc/greetd/config.toml
-        install -Dm755 /opt/ordo/config/desktop/greetd/greetd.initd /etc/init.d/greetd
-        # 密钥环自动解锁 + greeter 状态目录（属主是 greetd 而非包硬编码的 greeter）
-        install -Dm644 /opt/ordo/config/desktop/greetd/pam.d-greetd /etc/pam.d/greetd
-        install -Dm644 /opt/ordo/config/desktop/greetd/tmpfiles-noctalia-greeter.conf /etc/tmpfiles.d/noctalia-greeter.conf
-        systemd-tmpfiles --create /etc/tmpfiles.d/noctalia-greeter.conf 2>/dev/null || \
-          opentmpfiles-setup 2>/dev/null || true
-        say "已部署 greetd 配置、服务、PAM 与 tmpfiles"
-    else
-        warn "未找到 config/desktop/greetd/config.toml"
-    fi
 else
     warn "未找到品牌资产（assets/branding/），跳过"
 fi
@@ -753,15 +770,30 @@ fi
 # 中文输入实测：Umbriel + fcitx5 + rime 可用。
 say "配置 greetd + Umbriel 会话"
 
-# 14a) display-manager 标准机制
-# display-manager-init 不在 config/world（它只服务于安装时的 OpenRC 服务定义，
-# world 里也不该有第二个"包清单"来源），由本段显式 emerge 安装；
-# 如果未来移入 world，这里的 emerge --noreplace 也保持幂等。
-if ! emerge -q sys-apps/display-manager-init 2>/dev/null; then
-    # 类目在不同版本可能变化，退回按名搜索安装
-    emerge -q gui-libs/display-manager-init 2>/dev/null \
-        || die "display-manager-init 安装失败 —— 没有它就没有图形登录（不能降级为 warn）"
-fi
+# 14a) 登录管理器：greetd 自有 initd（provide display-manager）
+# 四件套（config.toml / initd / pam.d / tmpfiles）是**系统必需**：
+# 旧版把它们放在品牌资产块里 —— assets/branding 缺失时只剩一条 warn，
+# 装完没有图形登录，而且没人发现（P2-11）。缺文件即 die。
+_greetd_src=/opt/ordo/config/desktop/greetd
+[ -f "$_greetd_src/config.toml" ] || die "缺少 $_greetd_src/config.toml —— 没有图形登录（检查 config/desktop/greetd）"
+mkdir -p /etc/greetd /etc/tmpfiles.d
+# 密钥环自动解锁 + greeter 状态目录（属主是 greetd 而非包硬编码的 greeter）
+install -Dm644 "$_greetd_src/config.toml" /etc/greetd/config.toml || die "greetd config.toml 部署失败"
+install -Dm755 "$_greetd_src/greetd.initd" /etc/init.d/greetd || die "greetd 服务脚本部署失败"
+install -Dm644 "$_greetd_src/pam.d-greetd" /etc/pam.d/greetd || die "greetd PAM 部署失败"
+install -Dm644 "$_greetd_src/tmpfiles-noctalia-greeter.conf" /etc/tmpfiles.d/noctalia-greeter.conf \
+    || die "greetd tmpfiles 部署失败"
+systemd-tmpfiles --create /etc/tmpfiles.d/noctalia-greeter.conf 2>/dev/null || \
+  opentmpfiles-setup 2>/dev/null || true
+say "已部署 greetd 配置、服务、PAM 与 tmpfiles"
+
+# display-manager-init 只提供 OpenRC 的 display-manager 包装服务；greetd 的
+# initd 自己 provide display-manager，两套入口互斥，这里只装包不启用服务。
+# -1 --noreplace：它是安装器的一次性引导工具，不进 world（P2-11）。
+emerge -q -1 --noreplace sys-apps/display-manager-init 2>/dev/null \
+    || emerge -q -1 --noreplace gui-libs/display-manager-init 2>/dev/null \
+    || die "display-manager-init 安装失败 —— 没有它就没有图形登录（不能降级为 warn）"
+
 # greetd 独占 tty1，必须禁用该 VT 上的 getty。
 # 不禁用则两者同时读键盘：输入错乱（"orood"）、登录框与 getty 提示重影。
 # SDDM 时代用 display-manager 服务处理这件事；greetd 自行管理 VT，需在此处理。
@@ -770,13 +802,17 @@ if [ -f /etc/inittab ]; then
         sed -i 's|^c1:\(.*\)tty1|#c1:\1tty1  # greetd 独占 tty1|' /etc/inittab
         say "已禁用 tty1 的 getty（交给 greetd）"
     fi
-    telinit q 2>/dev/null || kill -HUP 1 2>/dev/null || true
+    # chroot 里的 /run 已 bind（见 §4），telinit 走 /run/initctl。
+    # 绝不向 PID 1 发 HUP：那打到的是 live ISO 的 init，不是目标系统（P2-11）。
+    telinit q 2>/dev/null || warn "telinit q 失败（getty 配置将在重启后生效）"
 fi
 
-# greetd 自带服务（provide display-manager），不需要 display-manager 包装脚本。
-# /etc/conf.d/display-manager 仍写一份，供只支持该机制的工具有据可查。
+# 唯一启用的登录入口是 greetd；不再启用 display-manager 包装服务
+# （旧版两者都写，M2 上因缺 /etc/conf.d/display-manager 被 doctor 误报）。
+# /etc/conf.d/display-manager 仍写一份并指向 greetd，供认这个机制的工具有据可查。
 printf 'DISPLAYMANAGER="greetd"\n' > /etc/conf.d/display-manager
-rc-update add display-manager default 2>/dev/null || true
+rc-update add greetd default || die "greetd 注册失败 —— 没有图形登录界面"
+say "已启用 greetd（default runlevel）"
 
 
 # 14b) 用户态 dbus 会话总线 —— 必须在标准路径 /run/user/$UID/bus 上。
@@ -795,6 +831,18 @@ for _svc in pipewire pipewire-pulse wireplumber; do
     fi
 done
 say "已启用音频用户服务（pipewire / pipewire-pulse / wireplumber）"
+
+# 【P2-08】光有 /etc/user/runlevels/default/* 不够：OpenRC 的用户服务要以
+# user.<用户名> 实例进系统 runlevel 才会被拉起。旧版从不建实例，那些软链
+# 永远不生效，"音频由用户级 OpenRC 管理"只是注释。模板缺失时不连坐（warn）。
+if [ -f /etc/init.d/user ]; then
+    ln -sfn /etc/init.d/user /etc/init.d/user.ordo
+    rc-update add user.ordo default || warn "user.ordo 注册失败（用户级服务需手动启用）"
+    say "已启用 user.ordo（用户级 dbus / pipewire 等）"
+else
+    warn "缺少 /etc/init.d/user（openrc 用户服务模板），用户级服务需手动启用"
+fi
+
 # 兼容旧路径（用户级 runlevel 目录）
 mkdir -p /home/ordo/.config/rc/runlevels/boot
 ln -sfn /etc/user/init.d/dbus /home/ordo/.config/rc/runlevels/boot/dbus
@@ -813,6 +861,13 @@ done
 #      走 immodule 绕路，text-input-v3 协议接管不到。
 install -Dm755 "/opt/ordo/config/desktop/umbriel/ordo-umbriel-session" /usr/local/bin/ordo-umbriel-session 2>/dev/null \
     || warn "ordo-umbriel-session 部署失败（Umbriel 会话不可用）"
+
+# 【P2-08】x11-misc/xdg-user-dirs 在 config/world 里声明，但交付镜像里
+# 没有 /usr/bin/xdg-user-dirs-update（只有 Flatpak runtime 的副本），
+# 会话脚本用 `command -v` 静默跳过 → XDG 目录永不初始化。
+# 声明 = 系统：缺了就在安装期停下，而不是首启后静默。
+command -v xdg-user-dirs-update >/dev/null 2>&1 \
+    || die "xdg-user-dirs 未随 @world 安装（config/world 声明了 x11-misc/xdg-user-dirs）"
 
 # 14d-2) ffplay 替身 —— 番茄钟插件的依赖门禁（偏离登记 #65，docs/deviations.md 第十一节）。
 #        真 ffplay 属 ffmpeg 的 sdl USE（→ GTK3），替身转调 pw-play。
@@ -869,7 +924,9 @@ if [ -x /opt/ordo/scripts/ordo-config ]; then
     # 失败即停（AGENTS.md）：桌面配置未部署的系统 = 启动即裸奔，不允许带病完成安装
     HOME=/home/ordo /opt/ordo/scripts/ordo-config apply desktop \
         || die "ordo config apply desktop 失败——桌面配置未部署（修复后重跑安装）"
-    chown -R ordo:ordo /home/ordo/.config 2>/dev/null || true
+    # 必须 -h：coreutils 的 chown -R 默认跟随符号链接，会把软链目标
+    # /opt/ordo/config 一并改成 ordo 所有 —— 系统声明层变用户可写（P2-08）。
+    chown -hR ordo:ordo /home/ordo/.config 2>/dev/null || true
 else
     die "找不到 /opt/ordo/scripts/ordo-config —— 桌面配置无从部署（§11 应已安装 CLI）"
 fi
@@ -877,17 +934,41 @@ fi
 # ---- 15) Flatpak 应用清单（config/apps.d）----
 # 首启就能干活：浏览器 / 商店 / 文件管理器形状的东西全在 Flatpak。
 # 清单是数据（config/apps.d/*.list），本段只负责读它 —— 与 world 同一哲学。
+# 清单解析（apps.d 的格式允许行尾理由）：剥掉 `#` 之后的部分再取第一列。
+# 旧版只跳过 `#` 开头的行，`org.mozilla.firefox   # 浏览器` 整行被当成
+# app id 传给 flatpak，首启没有浏览器（P1-04）。install.sh 与
+# config/migrations 共用同一口径，tests/cases/090 断言两边解析结果一致。
+flatpak_apps_of() {
+    sed -e 's/#.*//' "$1" | awk 'NF { print $1 }'
+}
+
+# 【作用域】--user 的安装落在**执行者**家目录：root 执行会装进
+# /root/.local/share/flatpak，而首启登录的是 ordo —— 等于没装。
+# 所以 remote 与应用都以桌面用户身份执行（P1-04）。
 say "安装 Flatpak 应用清单"
-for _list in /opt/ordo/config/apps.d/*.list; do
-    [ -f "$_list" ] || continue
-    _group="$(basename "$_list" .list)"
-    while IFS= read -r _app; do
-        case "$_app" in ''|\#*) continue ;; esac
-        flatpak install --user --noninteractive -y flathub "$_app" >/dev/null 2>&1 \
-            && say "  $ _group: $_app" \
-            || warn "Flatpak 安装失败：${_app}（首启后可用 ordo app install $_app 补装）"
-    done < "$_list"
-done
+_flatpak_user="${ORDO_DESKTOP_USER:-ordo}"
+if ! command -v flatpak >/dev/null 2>&1; then
+    warn "flatpak 命令不存在（@world 应已装 sys-apps/flatpak，核对 config/world 与本轮 emerge）"
+elif ! id -u "$_flatpak_user" >/dev/null 2>&1; then
+    warn "桌面用户 $_flatpak_user 不存在，跳过应用清单（首启后用 ordo app install 补装）"
+else
+    as_flatpak_user() { su -s /bin/sh - "$_flatpak_user" -c "$1"; }
+    as_flatpak_user 'flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo' \
+        || warn "Flathub remote 添加失败（联网后以 ordo 身份执行：flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo）"
+    for _list in /opt/ordo/config/apps.d/*.list; do
+        [ -f "$_list" ] || continue
+        # 01-optional.list 是「推荐应用」的唯一定义处，不由安装器自动装。
+        case "${_list##*/}" in *optional*) continue ;; esac
+        _group="$(basename "$_list" .list)"
+        flatpak_apps_of "$_list" | while IFS= read -r _app; do
+            if as_flatpak_user "flatpak install --user --noninteractive -y flathub '$_app'" >/dev/null 2>&1; then
+                say "  $_group: $_app"
+            else
+                warn "Flatpak 安装失败：${_app}（首启后可用 ordo app install $_app 补装）"
+            fi
+        done
+    done
+fi
 
 # ---- 16) 定时快照（宪法承诺"快照全自动"的落点）----
 # 【评审发现】旧版只在文档里说 cron 会调 ordo-snap-auto，但从不创建 cron 文件，
@@ -905,6 +986,51 @@ CRON
 chmod 644 /etc/cron.d/ordo-snapshot
 rc-update add cronie default 2>/dev/null || warn "cronie 注册失败（定时快照不会运行）"
 
+# ---- 17) 构建清单（P1-02：verify 的期望值来源）----
+# 旧版的 `ordo config verify` 拿 /opt/ordo/config 和由它自己派生出的
+# /etc/portage/sets/ordo-core 比 —— 两边同源，verdict 恒绿；镜像里的
+# 旧副本（world 少 4 个 atom、会话脚本 1777B、版本三处不一致）照报「一致」。
+# 这里把本次构建的声明副本与部署产物逐文件落成 sha256 清单：
+# verify 只认这份清单，清单缺失 = 无法判定（退出码 2），不是通过。
+say "写入构建清单（/etc/ordo/build-manifest）"
+[ -s /opt/ordo/version ] || die "缺少 /opt/ordo/version —— 构建清单无从记录版本（§11 应已安装）"
+_manifest_sha() { sha256sum "$1" | awk '{print $1}'; }
+mkdir -p /etc/ordo
+{
+    printf 'manifest_version 1\n'
+    printf 'version %s\n' "$(cat /opt/ordo/version)"
+    printf 'platform %s\n' "$ORDO_PLATFORM"
+    printf 'arch %s\n' "$ARCH"
+    # 声明文件的装机副本：任何一份被手改或来自旧构建，verify 都会红。
+    for _rel in version config/world config/world.sh config/world.bare-metal \
+                "config/world.bare-metal.$ARCH" config/arch config/dataset \
+                config/forbidden-world config/oneshot-packages; do
+        [ -f "/opt/ordo/$_rel" ] || continue
+        printf 'decl %s %s\n' "$(_manifest_sha "/opt/ordo/$_rel")" "/opt/ordo/$_rel"
+    done
+    for _f in /opt/ordo/config/platform/*/world.base /opt/ordo/config/platform/*/world \
+              /opt/ordo/config/apps.d/*.list \
+              /opt/ordo/config/package.use/* \
+              /opt/ordo/config/package.accept_keywords/* \
+              /opt/ordo/config/package.mask/*; do
+        [ -f "$_f" ] || continue
+        printf 'decl %s %s\n' "$(_manifest_sha "$_f")" "$_f"
+    done
+    # 部署产物：构建时从声明拷出去的文件，磁盘上的字节必须与声明一致。
+    for _pair in \
+        /opt/ordo/config/desktop/umbriel/ordo-umbriel-session:/usr/local/bin/ordo-umbriel-session \
+        /opt/ordo/config/desktop/ordo-session-env:/usr/local/bin/ordo-session-env \
+        /opt/ordo/config/desktop/ffplay:/usr/local/bin/ffplay; do
+        _msrc=${_pair%%:*}
+        _mdst=${_pair##*:}
+        [ -f "$_msrc" ] || continue
+        # 目标缺失也照写：verify 要能报出「部署产物缺失」，而不是静默跳过。
+        printf 'copy %s %s %s\n' "$(_manifest_sha "$_msrc")" "$_msrc" "$_mdst"
+    done
+} > /etc/ordo/build-manifest || die "构建清单写入失败（/etc/ordo/build-manifest）"
+chmod 644 /etc/ordo/build-manifest
+say "构建清单已写入：$(grep -cE '^(decl|copy) ' /etc/ordo/build-manifest | tr -d ' ') 项"
+
 say "chroot 完成"
 CHROOT
     rm -rf -- "$TARGET/var/tmp/ordo-source"
@@ -912,7 +1038,7 @@ fi
 
 # ---------- 5. 收尾：干净卸载 + 干净导出（首次开机无脏状态） ----------
 say "收尾：卸载并干净导出 pool"
-for mount_dir in dev sys proc efi; do
+for mount_dir in dev sys proc run efi; do
     if mountpoint -q "$TARGET/$mount_dir"; then
         umount -R "$TARGET/$mount_dir"
     fi

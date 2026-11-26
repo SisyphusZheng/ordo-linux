@@ -1,6 +1,26 @@
-brcm/brcmfmac4387c2-pcie.apple,hokkaido.bin
-brcm/brcmfmac4387c2-pcie.apple,hokkaido.txt
-brcm/brcmfmac4387c2-pcie.apple,hokkaido.clm_blob
-brcm/brcmfmac4387c2-pcie.apple,hokkaido.txcap_blob
-brcm/brcmbt4387c2-apple,hokkaido-u.bin
-brcm/brcmbt4387c2-apple,hokkaido-u.ptb
+# J413（MacBook Air M2）Wi-Fi/蓝牙固件映射：Apple 固件包内的源文件名 → 内核请求名。
+#
+# 【为什么需要这张表】Apple 固件包里的文件名不带板型后缀，brcmfmac 却按「板型后缀链」
+# 逐个请求（serial.log:289-294 实测：-TPHN-u-4.7-X2 → -TPHN-u-4.7 → -TPHN-u →
+# -TPHN → -X2 → 无后缀），每条都 failed with error -2 后才放弃且不重试。
+# 只把源文件名放进 initramfs 永远不会命中，补文件也不会亮 Wi-Fi。
+#
+# 【格式】每行「源文件名」后跟一个或多个「内核请求名」，空白分隔；# 起注释。
+# 第一个请求名落真实副本，其余在同目录内做成指向它的符号链接（与 asahi-fwextract 同做法），
+# 这样 initramfs 不会为每个别名多存一份几 MB 的固件。
+#
+# 【消费方】以下三处必须共读这一份，不得各写一遍：
+#   dev/m2/build.py                       装配 initramfs 与安装镜像
+#   config/platform/m2/boot-sync.sh       换内核时重建 initramfs
+#   config/platform/m2/verify-hardware.sh 装机验收
+# install-external.sh 按同一张表补齐 /lib/firmware/vendorfw 里的请求名。
+
+brcm/brcmfmac4387c2-pcie.apple,hokkaido.bin  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7-X2.bin  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7.bin  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u.bin  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN.bin  brcm/brcmfmac4387c2-pcie.apple,hokkaido-X2.bin  brcm/brcmfmac4387c2-pcie.apple,hokkaido.bin
+brcm/brcmfmac4387c2-pcie.apple,hokkaido.txt  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7-X2.txt  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7.txt  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u.txt  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN.txt  brcm/brcmfmac4387c2-pcie.apple,hokkaido-X2.txt  brcm/brcmfmac4387c2-pcie.apple,hokkaido.txt
+brcm/brcmfmac4387c2-pcie.apple,hokkaido.clm_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7-X2.clm_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7.clm_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u.clm_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN.clm_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-X2.clm_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido.clm_blob
+brcm/brcmfmac4387c2-pcie.apple,hokkaido.txcap_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7-X2.txcap_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u-4.7.txcap_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN-u.txcap_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-TPHN.txcap_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido-X2.txcap_blob  brcm/brcmfmac4387c2-pcie.apple,hokkaido.txcap_blob
+
+# 蓝牙 hci_bcm4377 请求的就是源文件名本身（无板型后缀）；本机没有蓝牙 dmesg 证据，
+# 这里按“请求名 = 源文件名”登记，真机验收由 verify-hardware.sh 的 bluetooth() 判定。
+brcm/brcmbt4387c2-apple,hokkaido-u.bin  brcm/brcmbt4387c2-apple,hokkaido-u.bin
+brcm/brcmbt4387c2-apple,hokkaido-u.ptb  brcm/brcmbt4387c2-apple,hokkaido-u.ptb

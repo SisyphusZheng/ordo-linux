@@ -54,7 +54,10 @@ assert recipe == ['EBUILD', ebuild.name, str(len(source)), 'BLAKE2B', blake2b(so
                   'SHA512', sha512(source).hexdigest()]
 PYTHON
 assert_rc "$?" 0 "固定归档名与清单一致，ebuild 哈希正确"
-assert_contains "$(cat "$ROOT/overlay/.gitignore")" "!gui-apps/luciole/Manifest" "Luciole Manifest 不被忽略"
+assert_not_contains "$(cat "$ROOT/overlay/.gitignore")" "gui-apps/*/Manifest" \
+    "没有忽略 gui-apps 的 Manifest 规则"
+assert_rc "$(cd "$ROOT" && git check-ignore -q overlay/gui-apps/luciole/Manifest; echo $?)" 1 \
+    "Luciole Manifest 不被忽略"
 
 case_name "已下线的 overlay 包不再存在"
 

@@ -5,13 +5,17 @@
 #
 # 真机安装和 OneConfig 应用时并入 @ordo-core。
 # VM 安装不读本文件。
+#
+# 【按架构分片】微码 vendor 不同：x86 微码（intel-microcode/amd-ucode）
+# 在 arm64 上是**不存在**的包，装进来只会在 autounmask 收敛后失败。
+# 本文件只放架构中立包；vendor 相关的放 world.bare-metal.<ARCH>
+# （ARCH 取自 config/arch，由 config/world.sh 合并）。
 
 net-wireless/wpa_supplicant
 net-wireless/iw
 net-wireless/wireless-regdb
 net-wireless/bluez
 sys-firmware/linux-firmware
-sys-firmware/intel-microcode
 sys-power/power-profiles-daemon
 media-libs/alsa-ucm-conf
 sys-apps/i2c-tools

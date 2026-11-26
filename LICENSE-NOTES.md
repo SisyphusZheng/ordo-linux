@@ -1,23 +1,52 @@
 # 许可说明
 
-[LICENSE](LICENSE) 列出了 Ordo 原创代码、系统定义、文档和品牌素材的许可。第三方内容保留其原始许可和署名。
+本仓库**不采用单一许可证**。不同性质的内容走不同的许可，因为它们的用途不同。
 
-| 内容 | Ordo 原创部分的许可 |
-|---|---|
-| 安装器、CLI、开发工具、测试、CI、系统配置、overlay 配方 | GPL-2.0-or-later |
-| 用户手册、设计文档、品牌图形及生成的桌面壁纸 | CC BY-SA 4.0 |
+## 按内容划分
 
-## 第三方来源
+| 路径 | 许可证 | 为什么 |
+|---|---|---|
+| `install.sh`、`scripts/`、`config/` | **GPL-2.0-or-later** | 这是系统本体。GPL 保证「改过的系统定义也必须开放」，与 Gentoo 底座同向，也保护 README 里「可拥有」这个承诺 |
+| `docs/`（手册、ADR、偏离账本） | **CC BY-SA 4.0** | 文档希望被传播与翻译，但要求署名、且衍生文档同样开放 |
+| `assets/branding/`（logo、壁纸、ASCII 画） | **CC BY-SA 4.0** | 同上；品牌资产允许在衍生发行版中复用，但需署名 |
+| `tests/`、`Makefile`、`.github/` | **GPL-2.0-or-later** | 与代码同步 |
+| `dev/`（构建、发布、VM 工具） | **GPL-2.0-or-later** | 与系统本体同源，脚本改动直接影响交付物 |
+| `overlay/`（ebuild 与补丁） | **GPL-2.0-or-later**；`app-crypt/libsecret` 补丁随上游 **LGPL-2.1** | 配方是构建定义；补丁是上游 LGPL 代码的衍生物 |
 
-- `overlay/` 中 ebuild 的代码和它下载的软件是独立作品。查看配方中的 `LICENSE`、固定源码版本及上游随附的许可。
-- M2 的 OpenZFS、UPower 和电源服务默认配置随文件提供来源与许可。OpenZFS 包含 CDDL 许可的代码。[默认配置来源](config/platform/m2/package-defaults/README.md)
-- M2 的 Linux 驱动构建说明和补丁见 [display](dev/m2/display/README.md) 与 [power](dev/m2/power/README.md)。此源码预览不附带旧版编译模块、Apple 专有固件、主机密钥或安装磁盘。
-- 桌面壁纸可用 [壁纸生成器](dev/gen-wallpaper.py) 和[桌面背景生成器](config/desktop/wallpapers/gen-blackhole.py) 生成。项目标记见 [品牌目录](assets/branding/)。
+`SPDX-License-Identifier` 逐文件标注不现实（本仓大量是 KDL/TOML/PNG 等无注释能力的格式），
+因此以上表为准。
 
 ## 为什么不是 MIT
 
-项目为原创系统代码选用 GPL-2.0-or-later，为原创文档和图形选用 CC BY-SA 4.0。修改和分发时请保留相应的署名、许可与版权声明。[许可全文](licenses/)
+MIT 允许有人把 `config/` + `scripts/` 做成闭源产品。对这个项目来说，那不是"更自由"，
+而是让「这套系统可以被你完全拥有」的承诺对下游失效 —— 拿到 fork 的人不再能拥有它。
 
-## 曾经的错误
+单人项目执行 copyleft 的能力确实有限（没有法律实体，实际不会起诉）。
+但许可首先是**对下游的声明**，其次才是武器。
 
-早期私有历史里收录过上游项目截图。公开源码从经过审阅的独立快照建立，旧截图不在公开版本中。
+## 第三方组件
+
+第三方内容随文件的原始许可分发。
+
+- 壁纸与 logo 由 `dev/gen-branding.sh` 生成，或为纯色渐变，无第三方来源
+- `overlay/app-crypt/libsecret/files/*.patch` 是上游 libsecret 的补丁，随上游 **LGPL-2.1** 分发，全文见 `licenses/LGPL-2.1.txt`
+- `overlay/gui-apps/luciole` 只分发配方与校验清单，上游源码按 **MIT** 授权，全文见 `licenses/MIT.txt`
+- 调色板 `config/desktop/themes/*.conf` 的色值取自公开色彩规范（Catppuccin 的调色板本身以 MIT 发布，
+  色值不受版权保护；我们只使用色号，不复制其代码或文档）
+- 文档中提及 Omarchy、niri、ashell 等仅作技术对照，不附带其代码或素材
+- `config/platform/m2/package-defaults/` 随 M2 安装器独立分发 OpenZFS 2.4.4、Gentoo 电源配置服务和 UPower 1.91.3 的默认文件。各文件许可及来源见该目录的 README；CDDL-1.0 全文见 `licenses/CDDL-1.0.txt`。
+
+**曾经的错误**：2026-11-21 之前，本仓的 `docs/screenshots/` 里有 5 张 Omarchy 官方截图
+和 35 张开发过程截图，且被一个 MIT 许可证笼统覆盖。该目录已整体删除（commit 见 CHANGELOG）。
+
+## 运行时依赖（不随本仓分发，各依其自身许可）
+
+| 组件 | 许可 | 备注 |
+|---|---|---|
+| Gentoo 基础系统（Portage / OpenRC / baselayout） | GPL-2 | 由用户自行 `emerge` |
+| OpenZFS | **CDDL-1.0** | 与 GPL 不兼容，但它是**独立可执行程序/内核模块**，不与本仓代码构成派生作品（与 Debian 分发 OpenZFS 的做法一致） |
+| Flatpak 应用 | 各自 | 由用户在运行时安装 |
+
+**L2 binhost 的额外义务**：分发 binpkg 时须随附该包的许可全文（`licenses/` 已含
+GPL-2、LGPL-2.1、CDDL-1.0、MIT）；若分发 `sys-kernel/gentoo-kernel-bin`，还需按
+GPL-2 提供对应源码或书面报价。

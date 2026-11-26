@@ -39,7 +39,10 @@ def main():
             if actual != args.qcow2_sha256:
                 parser.error(f"archived disk SHA-256 differs: {actual}")
         args.output.hardlink_to(staged)
+    digest = hashlib.file_digest(args.output.open("rb"), "sha256").hexdigest()
+    (args.output.parent / "UTM-SHA256SUMS").write_text(f"{digest}  {args.output.name}\n")
     print(f"Verified archived disk SHA-256 {actual}")
+    print(f"Wrote UTM-SHA256SUMS with archive SHA-256 {digest}")
 
 
 if __name__ == "__main__":

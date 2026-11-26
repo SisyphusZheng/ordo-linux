@@ -90,10 +90,15 @@ def copy_member(source, length, write):
 
 def verify_initramfs(image, release, root_uuid, version, firmware=None, drivers=()):
     expected = {}
+    symlinks = {}
     if firmware:
         for row in firmware.read_text().splitlines():
             digest, name = row.split("  ", 1)
-            expected[name.encode()] = digest
+            if digest.startswith("symlink:"):
+                # 别名只核验链接存在且指向同一目录里的真实副本（不重复存固件）
+                symlinks[name.encode()] = digest.removeprefix("symlink:")
+            else:
+                expected[name.encode()] = digest
     matching_firmware = set()
     remaining_drivers = {name.encode().split(b".ko", 1)[0] for name in drivers}
     remaining_indices = {b"modules.dep.bin", b"modules.alias.bin"} if remaining_drivers else set()
@@ -133,6 +138,12 @@ def verify_initramfs(image, release, root_uuid, version, firmware=None, drivers=
                         matching_firmware.add(name)
                     else:
                         matching_firmware.discard(name)
+                elif name in symlinks:
+                    target = source.read(length)
+                    if target == symlinks[name].encode():
+                        matching_firmware.add(name)
+                    else:
+                        matching_firmware.discard(name)
                 else:
                     if length and release_dir in b"/" + name:
                         relative = (b"/" + name).split(release_dir, 1)[1]
@@ -147,7 +158,8 @@ def verify_initramfs(image, release, root_uuid, version, firmware=None, drivers=
         embedded = subprocess.check_output(["modinfo", "-F", "version", zfs_module], text=True).strip()
         if embedded != version:
             raise ValueError(f"initramfs 的 ZFS 模块 {embedded} 与目标系统 {version} 不一致")
-    if missing := (expected.keys() - matching_firmware) | remaining_drivers | remaining_indices:
+    wanted = set(expected) | set(symlinks)
+    if missing := (wanted - matching_firmware) | remaining_drivers | remaining_indices:
         raise ValueError("initramfs 缺少匹配的 M2 驱动或固件：" +
                          ", ".join(name.decode() for name in sorted(missing)))
 

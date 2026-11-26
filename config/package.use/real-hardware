@@ -28,9 +28,9 @@ media-libs/alsa-lib           -systemd
 sys-power/upower              elogind
 #   elogind：电池事件走 elogind（无 systemd）
 
-# ---- 微码（安全；按 CPU 厂商选） ----
-# Intel：
-sys-firmware/intel-microcode  initramfs
-#   initramfs：微码打进 initramfs（在加载内核模块前生效，才能修 CVE）
-# AMD：
-#sys-firmware/amd-ucode       initramfs
+# ---- 微码（安全） ----
+# 「装哪个微码包」属于声明层，已按架构分片：
+#   config/world.bare-metal.amd64 → sys-firmware/intel-microcode（仅 amd64 真机）
+# arm64 真机没有 x86 微码包，这里不再无条件写 Intel 专用的 USE。
+# 若 amd64 真机需要微码进 initramfs（加载内核模块前生效），按实际 CPU 追加：
+#sys-firmware/intel-microcode  initramfs

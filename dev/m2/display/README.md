@@ -1,7 +1,5 @@
 # M2 内屏驱动
 
-公开源码包含重建脚本。制作旧版介质时，将脚本的输出保存为 `dev/m2/display/modules.tar.gz`。0.1.0 独立 USB 安装器从发行载荷读取所需的原生驱动。
-
 外接盘使用的 7.0.9-asahi-2 内核把 drm_kms_helper 等组件编进了内核。旧模块包使用同一版本号，但来自启用 simpledrm 之前的配置。它的依赖索引指示 modprobe 再次加载 drm_kms_helper，内核以 duplicate symbol 拒绝，导致 appledrm 无法按依赖加载。
 
 modules.tar.gz 提供该内核的 appledrm、配套依赖和 kmod 索引。制盘时将它们放入系统 initramfs，安装时也部署到根文件系统。Mesa 的软件渲染和 Apple 显示控制器可以各自独立工作。

@@ -95,13 +95,13 @@ ORDO_ARCH=amd64 ORDO_PLATFORM=bare-metal sh install.sh /dev/sda
 reboot
 ```
 
-拔掉 U 盘 → 应该进 ZFSBootMenu → 自动引导 → 中文 GDM。
+拔掉 U 盘 → 应该进 ZFSBootMenu → 自动引导 → 中文 Noctalia 登录界面（greetd）。
 
 ## 8. 首次登录后
 
 ```sh
-# 用户 ordo，密码 ordo（请立即改）
-passwd
+# 用户 ordo；密码是安装器打印的一次性随机密码（见安装日志）
+passwd        # 改成你自己的
 
 # 验证
 ordo info

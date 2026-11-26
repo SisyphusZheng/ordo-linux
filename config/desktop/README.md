@@ -23,7 +23,28 @@ config/desktop/{umbriel,noctalia,greetd}/*.toml
 ~/.config/{umbriel,noctalia}/config.toml
 ```
 
-**没有第二份副本。** 改仓库文件即等于改生效配置，不需要重新 apply。
+**默认没有第二份副本。** 改仓库文件即等于改生效配置，不需要重新 apply。
+
+唯一例外是 `~/.config/wezterm/wezterm.lua`：它按手册要由用户原地编辑，
+且 Noctalia 的 wezterm 模板会往里写色名。`ordo config apply desktop`
+（以及会话入口 `ordo-umbriel-session`，用于修复旧系统里的软链）把它落成
+属主是桌面用户的真实副本；其余文件仍是软链。
+
+## 密钥服务契约
+
+`app-crypt/libsecret::local` 只提供客户端库：`gnome-base/gnome-keyring` 与
+`virtual/secret-service` 被 mask，默认桌面**没有**全局 Secret Service
+（偏离登记见 `docs/deviations.md`「libsecret 客户端与 Secret Service 分开安装」）。
+
+| 消费方 | 约定 |
+|---|---|
+| NetworkManager | Wi-Fi 密码存系统 keyfile（`psk-flags=0`），不依赖 agent |
+| Noctalia 网络面板 | 会尝试用 `org.freedesktop.secrets` 存取密码；缺失时日志报 `[network] keyring lookup failed`，若连接被建成 agent-owned 需改回系统存储：`nmcli connection modify <连接名> wifi-sec.psk-flags 0` |
+| 依赖钥匙环的应用 | 用自己的账号体系登录与存储；不保证跨会话记住密码 |
+
+验收：`sh config/desktop/keyring-policy.sh check`（0 通过 / 1 有残留或缺少
+客户端库 / 2 无法判定）。残留的 D-Bus 激活文件（含
+`org.gnome.keyring.{Private,System}Prompter.service`）与 PAM 配置都会被报出来。
 
 ## 为什么是这一套
 

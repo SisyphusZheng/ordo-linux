@@ -1,0 +1,4 @@
+sys-auth/pambase -gnome-keyring
+# The PAM stack must not select the GNOME Keyring service.
+app-crypt/pinentry -gtk -keyring ncurses
+# Keep GnuPG passphrase entry via Qt or the terminal without the GNOME backend.

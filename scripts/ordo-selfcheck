@@ -79,6 +79,7 @@ _dispatch_targets="$(sed -n '/^case "\$cmd" in/,/^esac/p' "$ORDO_SH" \
     | sed -n 's/.*_dispatch[[:space:]][[:space:]]*\([a-z][a-z-]*\).*/\1/p' | sort -u)"
 if [ -z "$_dispatch_targets" ]; then
     report skip "未解析出 _dispatch 目标（不是通过）"
+    n_skip=$((n_skip + 1))
 else
     _bad_target=""
     for _t in $_dispatch_targets; do
@@ -125,17 +126,23 @@ fi
 
 # ---- 4) 每个脚本的 shebang 与可执行位 ----
 _bad_exec=""
+_bad_shebang=""
 for _f in "$_dir"/*; do
     [ -f "$_f" ] || continue
     case "$_f" in *.sh) continue ;; esac   # 被 source 的库，不需要可执行
     [ -x "$_f" ] || _bad_exec="$_bad_exec $(basename "$_f")"
     head -1 "$_f" | grep -q '^#!/bin/sh' \
-        || report bad "$(basename "$_f") 的 shebang 不是 #!/bin/sh"
+        || _bad_shebang="$_bad_shebang $(basename "$_f")"
 done
 if [ -n "$_bad_exec" ]; then
     report bad "以下脚本缺少可执行位:$_bad_exec"
     n_bad=$((n_bad + 1))
-else
+fi
+if [ -n "$_bad_shebang" ]; then
+    report bad "以下脚本的 shebang 不是 #!/bin/sh:$_bad_shebang"
+    n_bad=$((n_bad + 1))
+fi
+if [ -z "$_bad_exec" ] && [ -z "$_bad_shebang" ]; then
     report ok "入口脚本均可执行且 shebang 正确"
 fi
 

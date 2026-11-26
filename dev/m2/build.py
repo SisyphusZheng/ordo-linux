@@ -20,12 +20,17 @@ PLATFORM = REPO / "config/platform/m2"
 BASE_SHA = "2e9c0b1a0e308fcf0447b1b38935457fdad65e8e0081629aed14a8ce1161fec1"
 
 
+class Symlink(str):
+    """A firmware alias stored as a symlink to the real copy (newc S_IFLNK)."""
+
+
 def archive(files):
     """newc overlay read after the base archive by Linux unpack_to_rootfs."""
     output = bytearray()
     for ino, (name, data) in enumerate([*files.items(), ("TRAILER!!!", b"")], 1):
-        mode = 0o40755 if data is None else 0o100755
-        data = data or b""
+        link = isinstance(data, Symlink)
+        mode = 0o120777 if link else 0o40755 if data is None else 0o100755
+        data = str(data).encode() if link else data or b""
         fields = (ino, mode, 0, 0, 1, 0, len(data), 0, 0, 0, 0, len(name) + 1, 0)
         output.extend(b"070701" + "".join(f"{field:08x}" for field in fields).encode())
         output.extend(name.encode() + b"\0")
@@ -40,7 +45,8 @@ def bundle(include_legacy=True):
     with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as tar:
         inputs = sorted(path for path in (REPO / "config/desktop").rglob("*") if path.is_file() and not path.name.startswith("._") and path.name != ".DS_Store")
         inputs.extend(sorted(path for path in (PLATFORM / "package-defaults").rglob("*") if path.is_file()))
-        for name in ("config/platform/m2/first-desktop.sh", "config/platform/m2/install-display.sh",
+        for name in ("config/platform/m2/first-desktop.sh", "config/platform/m2/first-apps.sh",
+                     "config/platform/m2/install-display.sh",
                      "config/platform/m2/install-native.sh", "config/platform/m2/install-cli.sh",
                      "config/platform/m2/install-hardware.sh", "config/platform/m2/verify-hardware.sh",
                      "config/platform/m2/speakersafetyd.conf",
@@ -57,7 +63,10 @@ def bundle(include_legacy=True):
                      "config/dataset", "config/check-build", "config/zfs-arc.start",
                      "config/migrations/1795594673-m2-desktop-environment.sh",
                      "config/migrations/1795601392-m2-package-defaults.sh",
+                     "config/migrations/1795627149-remove-gnome-keyring.sh",
                      "config/world", "config/world.sh", "config/world.bare-metal",
+                     "config/package.mask/ordo-keyring", "config/package.use/ordo-keyring",
+                     "config/package.use/ordo-storage",
                      "config/forbidden-world", "config/oneshot-packages", "version",
                      "scripts/lib.sh", "scripts/ordo-i18n.sh", "scripts/ordo", "scripts/doctor",
                      "scripts/ordo-config", "scripts/ordo-snap", "scripts/ordo-snap-auto",
@@ -67,7 +76,8 @@ def bundle(include_legacy=True):
             inputs.append(REPO / "dev/m2/display/modules.tar.gz")
         else:
             luciole = REPO / "overlay/gui-apps/luciole"
-            inputs.extend([luciole / "Manifest", luciole / "luciole-0.1.0.ebuild"])
+            inputs.extend([luciole / "Manifest", luciole / luciole_ebuild()])
+        inputs.extend(sorted(path for path in (REPO / "overlay/app-crypt/libsecret").rglob("*") if path.is_file()))
         for path in inputs:
             rel = path.relative_to(REPO).as_posix()
             if path.is_symlink():
@@ -89,14 +99,33 @@ def touch_firmware(vendor_cpio):
     return blob
 
 
+def firmware_map():
+    """Parse the shared source -> requested-name table used by all M2 consumers."""
+    mapping = {}
+    for number, line in enumerate((PLATFORM / "wireless-firmware").read_text().splitlines(), 1):
+        line = line.split("#", 1)[0]
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) < 2 or len(set(fields[1:])) != len(fields) - 1:
+            raise ValueError(f"Invalid wireless-firmware mapping on line {number}")
+        mapping[fields[0]] = fields[1:]
+    if not mapping:
+        raise ValueError("Empty wireless-firmware mapping")
+    return mapping
+
+
 def wireless_firmware(vendor_cpio):
-    files = {}
-    for name in (PLATFORM / "wireless-firmware").read_text().splitlines():
-        data = subprocess.check_output(["bsdtar", "-xOf", vendor_cpio, f"vendorfw/{name}"])
+    """Return ({requested name: data}, {alias: real copy}) from the shared mapping."""
+    files, links = {}, {}
+    for source, targets in firmware_map().items():
+        data = subprocess.check_output(["bsdtar", "-xOf", vendor_cpio, f"vendorfw/{source}"])
         if not data:
-            raise ValueError(f"Empty Apple wireless firmware: {name}")
-        files[name] = data
-    return files
+            raise ValueError(f"Empty Apple wireless firmware: {source}")
+        files[targets[0]] = data
+        for alias in targets[1:]:
+            links[alias] = targets[0]
+    return files, links
 
 
 def regulatory_firmware(binhost):
@@ -176,6 +205,23 @@ def payload_manifest(usb_payload=False, override=None, expected=None):
     return replacement
 
 
+def legacy_release():
+    """Kernel release pinned by the delivered payload manifest (single source)."""
+    releases = {name.removeprefix("kernel/vmlinuz-") for name in payload_manifest(False)
+                if re.fullmatch(r"kernel/vmlinuz-[^/]+", name) and not name.endswith(".EFI")}
+    if len(releases) != 1:
+        raise ValueError("payload.sha256 must pin exactly one kernel image")
+    return releases.pop()
+
+
+def luciole_ebuild():
+    """Local overlay ebuild name; the version must not be hardcoded in consumers."""
+    ebuilds = sorted((REPO / "overlay/gui-apps/luciole").glob("*.ebuild"))
+    if len(ebuilds) != 1:
+        raise ValueError("overlay/gui-apps/luciole must contain exactly one ebuild")
+    return ebuilds[0].name
+
+
 def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhost=None, native=None,
           usb_payload=False, payload_digests=None, base_sha256=None):
     boot, root = uuid.UUID(str(boot)), uuid.UUID(str(root))
@@ -195,8 +241,10 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
     if any(output.iterdir()):
         raise ValueError("Use an empty output directory")
     vendor_cpio = vendor_cpio or Path("/Volumes/EFI - ORDO/vendorfw/firmware.cpio")
+    legacy = legacy_release()
     firmware = {"apple/tpmtfw-j413.bin": touch_firmware(vendor_cpio)}
-    firmware.update(wireless_firmware(vendor_cpio))
+    wireless, links = wireless_firmware(vendor_cpio)
+    firmware.update(wireless)
     firmware.update(regulatory_firmware(binhost or base.parent.parent / "binhost"))
     live = output / "live"
     live.mkdir()
@@ -206,7 +254,7 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
     digest = hashlib.sha256(data).hexdigest()
     (output / f"desktop-{digest}.tar.gz").write_bytes(data)
     wait = (PLATFORM / "wait-usb.sh").read_text().replace("@ROOT_ID@", str(root))
-    module_path = "usr/lib/modules/7.0.9-asahi-2/kernel/drivers/power/supply/macsmc-power.ko"
+    module_path = f"usr/lib/modules/{legacy}/kernel/drivers/power/supply/macsmc-power.ko"
     legacy_drivers = {} if usb_payload else {module_path: (REPO / "dev/m2/power/macsmc-power.ko").read_bytes()}
     fwdir = "usr/lib/firmware"
     modules = " ".join((PLATFORM / "platform-modules").read_text().split())
@@ -215,6 +263,8 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
         f"{fwdir}/apple": None,
         f"{fwdir}/brcm": None,
         **{f"{fwdir}/{name}": data for name, data in firmware.items()},
+        # 别名只在 initramfs 里做符号链接，避免同一份固件存多份。
+        **{f"{fwdir}/{alias}": Symlink(target.rsplit("/", 1)[-1]) for alias, target in links.items()},
     }
     hostid = {}
     if usb_payload:
@@ -233,7 +283,7 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
             output, (PLATFORM / "asahi-revision").read_text().strip(), required)
         system = archive({**firmware_files, **hostid})
     else:
-        release = "7.0.9-asahi-2"
+        release = legacy
         kernel = inner / f"kernel/vmlinuz-{release}"
         kernel_sha = payload_digests[f"kernel/vmlinuz-{release}"]
         packed = b""
@@ -241,7 +291,7 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
         system = subprocess.check_output(["zstd", "-dc", inner / "kernel/system-asahi.img"])
         # Use the same release tree and binary depmod indices as the working Live
         # environment. Keep the patched power driver last so it wins on unpack.
-        prefix = "usr/lib/modules/7.0.9-asahi-2/"
+        prefix = f"usr/lib/modules/{release}/"
         with tarfile.open(REPO / "dev/m2/display/modules.tar.gz", "r:gz") as display:
             corrected = {prefix + item.name: display.extractfile(item).read() for item in display}
         builtins = {prefix + path for path in corrected[prefix + "modules.builtin"].decode().splitlines()}
@@ -285,6 +335,16 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
     engine = engine.replace("@PAYLOAD_HASHES@", "\n".join(f"{sha}  {path}" for path, sha in payload_digests.items()))
     engine = engine.replace("@NATIVE_SHA@", native_sha).replace("@KERNEL_SHA@", kernel_sha)
     engine = engine.replace("@KERNEL_RELEASE@", release)
+    shards = "\n".join(f"{sha}  {name}" for name, sha in payload_digests.items()
+                       if re.fullmatch(r"rootfs\.tar\.gz\.part0[0-3]", name))
+    if len(shards.splitlines()) != 4:
+        raise ValueError("payload.sha256 must pin the four rootfs shards")
+    engine = engine.replace("@ROOTFS_HASHES@", shards)
+    if leftover := sorted(set(re.findall(r"@[A-Z][A-Z0-9_]*@", engine))):
+        raise ValueError(f"Unsubstituted installer placeholders: {', '.join(leftover)}")
+    for block in ("ORDO_PAYLOAD_HASHES", "ORDO_ROOTFS_HASHES", 'NAME="Ordo Linux"'):
+        if block not in engine:
+            raise ValueError(f"Installer lost the {block} block")
     launch = (PLATFORM / "launcher").read_text().replace("@BOOT_ID@", str(boot)).replace("@ROOT_ID@", str(root))
     manual = (PLATFORM / "manual-init").read_text().replace("@PAYLOAD_BOOT_ID@", str(boot) if usb_payload else "")
     manual = manual.replace("@SQUASHFS_SHA@", payload_digests["image.squashfs"] if usb_payload else "")
@@ -293,6 +353,9 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
         f'mkdir -p /sysroot/{fwdir}/apple /sysroot/{fwdir}/brcm || rescue "firmware directories"\n'
         + "".join(f'cp /{fwdir}/{name} /sysroot/{fwdir}/{name} || rescue "missing firmware: {name}"\n'
                   for name in firmware)
+        + "".join(f'ln -sfn {target.rsplit("/", 1)[-1]} /sysroot/{fwdir}/{alias}'
+                  f' || rescue "missing firmware alias: {alias}"\n'
+                  for alias, target in links.items())
     )
     if usb_payload:
         handoff += 'cp /etc/hostid /sysroot/ordo-install-hostid || rescue "missing install hostid"\n'
@@ -300,7 +363,7 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
         handoff += f'cp /{module_path} /sysroot/ordo-power.ko || rescue "missing power driver"\n'
     live_init = (PLATFORM / "live-init").read_text().replace("@PLATFORM_MODULES@", modules)
     live_init = live_init.replace("@POWER_MODULE@", module_path)
-    live_init = live_init.replace("@LIVE_RELEASE@", release if usb_payload else "7.0.9-asahi-2")
+    live_init = live_init.replace("@LIVE_RELEASE@", release if usb_payload else legacy)
     live_init = live_init.replace("@USB_PAYLOAD@", "1" if usb_payload else "0")
     entries = {"ordo-engine":engine, "ordo-launch":launch,
                "ordo-live-init":live_init,
@@ -332,7 +395,7 @@ def build(base, inner, output, boot, root, log_id=None, vendor_cpio=None, binhos
         (live / name).write_bytes(packed)
     # Earlier M2 boot instructions load this name directly from U-Boot.
     (live / "initramfs-512.img").write_bytes((live / "initramfs-external.img").read_bytes())
-    live_kernel = kernel if usb_payload else inner / "kernel/vmlinuz-7.0.9-asahi-2"
+    live_kernel = kernel if usb_payload else inner / f"kernel/vmlinuz-{legacy}"
     (live / "vmlinuz-asahi").write_bytes(live_kernel.read_bytes())
     if usb_payload:
         boot_efi = output / "EFI/BOOT/BOOTAA64.EFI"

@@ -22,9 +22,9 @@ sys-apps/flatpak              -systemd
 sys-apps/xdg-desktop-portal   -systemd
 #   -systemd：portal 的 systemd 服务激活（我们靠会话脚本显式启动）
 
-# 字体：中文开箱
-media-fonts/noto-cjk          cjk
-#   cjk：装 CJK 字形（否则只有拉丁）
+# 字体：中文开箱。
+# noto-cjk 的 IUSE 只有 X —— 曾经这里写过 `cjk`，那是空操作：
+# Portage 对不存在的 USE 给警告后忽略，留下「已配置」的假象。
 
 # 依赖解析要求的显式 USE（VM 实测提取）
 net-libs/ngtcp2                   gnutls
@@ -62,10 +62,8 @@ media-video/ffmpegthumbnailer     -gtk
 net-wireless/wpa_supplicant       -gui
 #   -gui：见偏离 #58
 
-# rfkill 不是独立包 —— 它由 util-linux 的 USE flag 提供 /usr/bin/rfkill。
-# （曾是 config/world 里的 net-wireless/rfkill，那个包在 Gentoo 树里不存在）
-sys-apps/util-linux              rfkill
-#   rfkill：提供 /usr/bin/rfkill（无线开关诊断）
+# rfkill 时代的遗留：util-linux 没有 rfkill USE（评审核对介质 Packages 的 IUSE 确认），
+# 这一行从来是空操作。无线开关诊断走 net-wireless/iw（真机平台包）。
 
 # pipewire：开 extra 提供 pw-play / pw-cat 等小工具
 #   番茄钟插件声明 ffplay 依赖，ffplay 替身（config/desktop/ffplay，偏离 #65）

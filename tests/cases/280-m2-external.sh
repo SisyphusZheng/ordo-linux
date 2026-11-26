@@ -9,36 +9,6 @@ sys.path.insert(0, "dev/m2")
 from build import build, bundle, PLATFORM, archive
 from brand_boot import brand, PAYLOAD_OFFSET
 from boot_art import LOGO_MAGIC
-# The public source tree ships rebuild recipes for the legacy modules.
-# Exercise bundle and initramfs assembly on an isolated tree when both
-# generated inputs are absent. A partial pair is a broken build.
-import build as m2
-display_rel = Path("dev/m2/display/modules.tar.gz")
-power_rel = Path("dev/m2/power/macsmc-power.ko")
-if display_rel.is_file() != power_rel.is_file():
-    raise AssertionError("Incomplete legacy M2 driver inputs")
-if not display_rel.is_file():
-    fixture = tempfile.TemporaryDirectory()
-    tree = Path(fixture.name)
-    for name in ("config", "scripts", "licenses", "overlay"):
-        (tree / name).symlink_to(m2.REPO / name)
-    (tree / "version").write_bytes((m2.REPO / "version").read_bytes())
-    m2.REPO = tree
-    m2.PLATFORM = tree / "config/platform/m2"
-    (tree / power_rel).parent.mkdir(parents=True)
-    (tree / power_rel).write_bytes(b"synthetic-power-module")
-    (tree / display_rel).parent.mkdir(parents=True)
-    apple = "kernel/drivers/gpu/drm/apple/appledrm.ko"
-    with tarfile.open(tree / display_rel, "w:gz") as display:
-        for name, data in {
-            apple: b"synthetic-display-module",
-            "modules.dep": (apple + ":\n").encode(),
-            "modules.builtin": b"kernel/drivers/gpu/drm/drm_kms_helper.ko\n",
-        }.items():
-            entry = tarfile.TarInfo(name)
-            entry.size = len(data)
-            display.addfile(entry, io.BytesIO(data))
-    print("Testing legacy media assembly with synthetic driver inputs")
 # Preserve every byte of stage 2, including all device trees and U-Boot.
 original = bytes(PAYLOAD_OFFSET) + bytes.fromhex("d00dfeed") + b"test bundle"
 try:
@@ -85,7 +55,7 @@ assert "root=zfs:AUTO" in engine and "root=ZFS=rpool/root/ordo" not in engine
 assert engine.index("sha256sum -c") < engine.index("wipefs -a")
 assert "sh /opt/ordo/config/platform/m2/first-desktop.sh" in engine
 assert "sh /opt/ordo/scripts/ordo-config apply world" in engine
-assert engine.index("for file in Manifest luciole-0.1.0.ebuild") < engine.index('chroot "$TARGET" /bin/sh /opt/ordo/config/platform/m2/install-native.sh')
+assert engine.index('for file in "$luciole"/Manifest "$luciole"/*.ebuild') < engine.index('chroot "$TARGET" /bin/sh /opt/ordo/config/platform/m2/install-native.sh')
 assert engine.index('install -Dm755 "$greeter/greetd.initd" "$TARGET/etc/init.d/greetd"') < engine.index("sh /opt/ordo/config/platform/m2/first-desktop.sh")
 password = engine[engine.index('say "为本机的 ordo 账户设置密码'):engine.index("say \"6/7 内核")]
 assert password.index('mount --bind /dev "$TARGET/dev"') < password.index('chroot "$TARGET" passwd ordo')
@@ -107,8 +77,12 @@ with tempfile.TemporaryDirectory() as tmp:
         if path.name != "payload.sha256" and path.is_file():
             (platform / path.name).symlink_to(path.resolve())
     (tmp / "barefiles.tar.gz").write_bytes(b"fixture")
+    _shards = "".join(f"{hashlib.sha256(b'fixture').hexdigest()}  rootfs.tar.gz.part0{i}\n" for i in range(4))
     (platform / "payload.sha256").write_text(f"{hashlib.sha256(b'fixture').hexdigest()}  barefiles.tar.gz\n"
-                                            f"{hashlib.sha256(b'').hexdigest()}  kernel/vmlinuz-7.0.9-asahi-2\n")
+                                            f"{hashlib.sha256(b'').hexdigest()}  kernel/vmlinuz-7.0.9-asahi-2\n"
+                                            + _shards)
+    for _i in range(4):
+        (tmp / f"rootfs.tar.gz.part0{_i}").write_bytes(b"fixture")
     base = tmp / "base"
     base.write_bytes(b"fixture")
     (tmp / "kernel").mkdir()
@@ -121,7 +95,14 @@ with tempfile.TemporaryDirectory() as tmp:
             member = tarfile.TarInfo("7.0.9-asahi-2/" + rel)
             member.size = 1
             mods.addfile(member, io.BytesIO(b"x"))
-    wireless = {name: name.encode() for name in (platform / "wireless-firmware").read_text().splitlines()}
+    _map = {}
+    for _line in (platform / "wireless-firmware").read_text().splitlines():
+        _line = _line.split("#", 1)[0]
+        if _line.strip():
+            _fields = _line.split()
+            _map[_fields[0]] = _fields[1:] or [_fields[0]]
+    wireless = ({t[0]: src.encode() for src, t in _map.items()},
+                {alias: t[0] for t in _map.values() for alias in t[1:]})
     regulatory = {"regulatory.db": b"test-db", "regulatory.db.p7s": b"test-signature"}
     with patch("build.touch_firmware", return_value=b"j413-test-firmware"), patch("build.wireless_firmware", return_value=wireless), patch("build.regulatory_firmware", return_value=regulatory), \
          patch("build.build_system_uki", return_value=b"direct-efi"), patch("build.update_uki", return_value=b"efi") as zbm, patch("build.PLATFORM", platform), patch("build.bundle", return_value=b"bundle"), \
@@ -131,7 +112,7 @@ with tempfile.TemporaryDirectory() as tmp:
             stage = tmp / str(log_id)
             build(base, tmp, stage, uuid.uuid4(), uuid.uuid4(), log_id)
             img = (stage / "live/initramfs-external.img").read_bytes()
-            assert (root_module := ((m2.REPO / power_rel).read_bytes())) in img
+            assert (root_module := (Path("dev/m2/power/macsmc-power.ko").read_bytes())) in img
             assert next((stage / "live").glob("ordo-*.efi")).read_bytes() == b"direct-efi"
             assert 'cp "$BOOT_MOUNT/live/ordo-@DIRECT_SHA@.efi" "$BOOT_MOUNT/EFI/BOOT/ORDO.NEW"' in engine
             assert 'EFI/Ordo/ZFSBootMenu.EFI' in engine
@@ -139,7 +120,7 @@ with tempfile.TemporaryDirectory() as tmp:
             assert (b"/ordo-boot-report settled" in next((stage/"live").glob("system-*.img")).read_bytes()) == bool(log_id)
             sysimg = next((stage/"live").glob("system-*.img")).read_bytes()
             manual = (stage / "live/initramfs-live-manual.img").read_bytes()
-            for name in [*wireless, *regulatory]:
+            for name in [*wireless[0], *regulatory]:
                 fw = b"usr/lib/firmware/" + name.encode()
                 for boot_image in (img, sysimg, manual, zbm.call_args.args[1]):
                     assert fw + b"\0" in boot_image
@@ -183,7 +164,8 @@ with tempfile.TemporaryDirectory() as tmp:
               patch("build.build_live_uki", return_value=b"live-efi"),
               patch("build.sign_live_efi", return_value=b"live-signature")):
             build(base, tmp, stage, boot_id, root_id, native=NativeFixture(),
-                  usb_payload=True, payload_digests={"image.squashfs": live_sha})
+                  usb_payload=True, payload_digests={**{f"rootfs.tar.gz.part0{i}": hashlib.sha256(b"fixture").hexdigest()
+                                                for i in range(4)}, "image.squashfs": live_sha})
         initial = (stage / "live/initramfs-external.img").read_bytes()
         assert f"payload_boot_id='{boot_id}'".encode() in initial
         assert live_sha.encode() in initial

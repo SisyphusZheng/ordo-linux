@@ -13,7 +13,7 @@ printf '%s\n' sys-apps/baseline > "$tmp/conf/world"
 printf '%s\n' sys-firmware/fixture > "$tmp/conf/world.bare-metal"
 
 # Load the production functions and give them an isolated Portage state.
-sed -n '/^_declared_world()/,/^# ---------- show ----------/p; /^_apply_world()/,/^}/p' \
+sed -n '/^_declared_world()/,/^# ---------- show ----------/p; /^_apply_world_sets()/,/^}/p; /^_apply_world()/,/^}/p' \
     "$ROOT/scripts/ordo-config" > "$tmp/functions.sh"
 . "$tmp/functions.sh"
 sed 's|/etc/ordo/platform|'"$tmp"'/platform|g' "$tmp/conf/world.sh" > "$tmp/platform-functions"
@@ -31,6 +31,16 @@ case_name "应用与验收使用同一平台声明"
 _apply_world
 assert_rc "$?" 0 "apply 写出 Portage set"
 assert_contains "$(cat "$_ordo_set")" sys-firmware/fixture "真机 set 含裸机包"
+
+case_name "apply 同时把 set 选中（world_sets）"
+# 【P2-11】旧版只写 /etc/portage/sets/ordo-core，从不写 world_sets：
+# M2 的 install-external.sh 调完 apply world 就结束，@ordo-core 从未进 @world。
+assert_eq "$(cat "$_portage_sets")" '@ordo-core' "apply 后 @ordo-core 被选中"
+_apply_world
+assert_eq "$(wc -l < "$_portage_sets" | tr -d ' ')" 1 "重复 apply 不重复追加（幂等）"
+# 复现「旧系统没有 world_sets 选中」的状态，验证下面的未选中语义仍然成立。
+: > "$_portage_sets"
+
 printf '%s\n' sys-apps/baseline > "$_portage_world"
 _compare_world
 assert_rc "$?" 0 "可对比未选择 set 的旧系统"

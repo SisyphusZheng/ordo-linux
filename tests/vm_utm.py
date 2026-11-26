@@ -89,6 +89,8 @@ class TestUtm(unittest.TestCase):
             self.assertEqual(4, config["ConfigurationVersion"])
             self.assertEqual("QEMU", config["Backend"])
             self.assertEqual("aarch64", config["System"]["Architecture"])
+            # P1-07：virtio-ramfb 没有 virgl（cap sets: 0），虚拟机只能落到 pixman。
+            self.assertEqual("virtio-ramfb-gl", config["Display"][0]["Hardware"])
             uuid.UUID(config["Information"]["UUID"])
             uuid.UUID(config["Drive"][0]["Identifier"])
             self.assertEqual(disk.name, config["Drive"][0]["ImageName"])
@@ -114,8 +116,14 @@ class TestUtm(unittest.TestCase):
             result = subprocess.run(args + ["0" * 64], capture_output=True)
             self.assertNotEqual(0, result.returncode)
             self.assertFalse(output.exists())
+            self.assertFalse((folder / "UTM-SHA256SUMS").exists())
             digest = hashlib.sha256(disk.read_bytes()).hexdigest()
             subprocess.run(args + [digest], check=True)
+            zip_digest = hashlib.sha256(output.read_bytes()).hexdigest()
+            self.assertEqual(
+                f"{zip_digest}  {output.name}\n",
+                (folder / "UTM-SHA256SUMS").read_text(),
+            )
             with ZipFile(output) as archive:
                 self.assertEqual(
                     {"Ordo.utm/config.plist", "Ordo.utm/Data/Ordo.qcow2"},

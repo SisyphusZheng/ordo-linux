@@ -9,15 +9,8 @@
 # zfsbootmenu：只在 GURU overlay，无 arm64 keyword（见 docs/decisions/0002）
 sys-boot/zfsbootmenu **
 
-# tuigreet：主树只有 ~arm64（greetd 本体同样 ~arm64）
-gui-apps/tuigreet ~arm64
+# greetd：主树只有 ~arm64（图形前端是 config/world 的 gui-apps/noctalia-greeter）
 gui-libs/greetd ~arm64
-
-# wlsunset：只在 GURU，无 arm64 keyword
-gui-apps/wlsunset **
-
-# ashell：本地 overlay 的 9999 无 KEYWORDS（live ebuild 惯例）
-gui-apps/ashell **
 
 # Noctalia 全家桶：GURU 的 ebuild 只标了 ~amd64
 gui-apps/noctalia **

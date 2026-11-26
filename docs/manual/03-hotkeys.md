@@ -1,9 +1,9 @@
 # 03 · 快捷键
 
 > `Mod` = Super（Windows 键 / Command 键）。
-> 本文与 `config/desktop/keys.md` 同步生成；改键位请改
-> `config/desktop/umbriel/config.toml` 的 `[keybinds]` 段，然后同步 keys.md
->（`tests/lint.sh` 会核对两者一致）。
+> 本文与 `config/desktop/keys.md` 保持同步；改键位请改
+> `config/desktop/umbriel/config.toml` 的 `[keybinds]` 段，然后同步 keys.md。
+> `tests/lint.sh` 会核对 keys.md 与 `[keybinds]`，以及本文的 `Mod+` 组合都已绑定。
 
 ## 应用
 
@@ -67,6 +67,7 @@
 | `XF86AudioMute` | 静音切换 |
 | `XF86AudioPlay` / `XF86AudioNext` / `XF86AudioPrev` | 播放 / 下曲 / 上曲（playerctl） |
 | `XF86MonBrightnessUp` / `XF86MonBrightnessDown` | 屏幕亮度（Noctalia OSD 显示） |
+| `Mod+Shift+F1/F2` | 降低／提高 M2 MacBook Air 的键盘背光 |
 
 > 笔记本键盘上亮度键通常还要按住 `Fn` 才发出生成 `XF86MonBrightness*` 信号。
 

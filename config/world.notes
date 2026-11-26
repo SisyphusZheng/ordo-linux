@@ -149,3 +149,9 @@ dev-lang/python
 # gui-libs/display-manager-init  不进 world：它只服务于安装期的 OpenRC 服务定义，
 #                           由 install.sh §14a 显式 emerge。
 # ==============================================================================
+
+app-crypt/libsecret::local # 桌面客户端库，保留程序链接；独立密钥服务不再随桌面安装。
+
+gnome-base/gvfs # GIO 卷监视器，供 Luciole 枚举并挂载设备。
+sys-fs/udisks # 通过系统 D-Bus 提供外接盘，挂载操作经过 polkit。
+x11-misc/xdg-user-dirs # 按会话语言初始化用户常用目录。

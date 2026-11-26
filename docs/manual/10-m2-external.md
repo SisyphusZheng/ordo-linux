@@ -1,14 +1,20 @@
 # M2 MacBook Air 的外接盘安装
 
-本页的安装步骤供已取得 M2 候选安装包的测试者使用。公开仓库提供源码和制盘工具。
-
 本入口用于 Mac14,2 和外接 USB 盘。Mac 上需要由 Asahi 安装器建立的启动入口，以及包含本机固件的内部 EFI 系统分区。请使用本文的 M2 安装流程。
 
 ## 从另一台 M2 MacBook Air 准备 0.1.0 候选
 
 准备一块可以清空的外接 USB 盘（至少 64 GB）。在 macOS 内置盘上为下载、解压和制作留出约 12 GB。首次建立引导入口另需 Asahi 安装器提示的可用空间。
 
-1. 把 `Ordo-Linux-0.1.0-M2-Air-macOS.tar.gz` 和 `M2-SHA256SUMS` 放进同一个文件夹。在该文件夹打开终端，运行 `shasum -a 256 -c M2-SHA256SUMS`。看到 `OK` 后，用 Finder 解压安装包，双击里面的 `Install.command`。
+1. 把 `Ordo-Linux-0.1.0-M2-Air-macOS.tar.gz`、`M2-SHA256SUMS` 与 `M2-SHA256SUMS.sig` 放进同一个文件夹，再从仓库取 `config/release/allowed_signers` 放到同一目录。在该文件夹打开终端，先验证摘要签名，再核对摘要：
+
+   ```sh
+   ssh-keygen -Y verify -f allowed_signers -I ordo-preview -n ordo-release \
+       -s M2-SHA256SUMS.sig < M2-SHA256SUMS
+   shasum -a 256 -c M2-SHA256SUMS
+   ```
+
+   第一行输出 `Good "ordo-release" signature ...` 后再看第二行的 `OK`。安装包内的 `allowed_signers` 只用于包内完整性检查，不能当作来源信任锚。校验通过后，用 Finder 解压安装包，双击里面的 `Install.command`。
 2. 第一次在这台 Mac 上安装时，按提示在 Asahi 官方安装器中选择 **UEFI environment only**，用这台 Mac 的所有者账户在恢复环境完成认证。随后回到 macOS，再次双击同一份 `Install.command`。安装器会从这台 Mac 的引导分区提取固件。
 3. 核对安装器显示的外接盘名称和容量。确认清盘后，安装器会在选定盘上准备引导文件和系统分区。原盘上的文件会被清除。
 4. 保持外接盘连接，关机后长按电源键，选刚设置的 Ordo / Asahi 引导入口。在安装界面按提示确认目标，给自己的 `ordo` 账户设置密码。安装完成后按提示从同一入口启动桌面。原有 macOS 仍可从启动选项进入。

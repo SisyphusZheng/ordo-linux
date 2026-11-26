@@ -25,7 +25,7 @@ m2_boot_open() {
         ordo_bad "找不到内部 Asahi EFI 的设备树标识"
         return "$ORDO_EXIT_UNKNOWN"
     fi
-    ordo_require_tools blkid findmnt flock install lsblk modinfo modprobe mount python3 sha256sum sort umount zpool zstd
+    ordo_require_tools blkid findmnt flock install ln lsblk modinfo modprobe mount python3 sha256sum sort umount zpool zstd
     mkdir -p /run/lock || return "$ORDO_EXIT_BAD"
     exec 9>/run/lock/ordo-m2-boot.lock
     flock -n 9 || { ordo_bad "已有 M2 升级或回滚正在运行"; return "$ORDO_EXIT_BAD"; }
@@ -128,17 +128,46 @@ m2_boot_module_paths() {
 m2_boot_firmware() {
     _m2_fw_dir="$M2_BOOT_ROOT/lib/firmware"
     [ -s "$M2_BOOT_DIR/wireless-firmware" ] || return 1
-    {
-        cat "$M2_BOOT_DIR/wireless-firmware"
-        printf '%s\n' apple/tpmtfw-j413.bin regulatory.db regulatory.db.p7s
-    } | while IFS= read -r _m2_fw; do
+    _m2_fw_dest=${1:-}
+    # 映射来自 wireless-firmware：源文件名 → 内核请求名（首个落副本，其余符号链接）。
+    # 只放源文件名时 brcmfmac 一条都请求不到（P1-03）。
+    while IFS= read -r _m2_line || [ -n "$_m2_line" ]; do
+        _m2_line=${_m2_line%%#*}
+        case "$_m2_line" in
+            *[![:space:]]*) ;;
+            *) continue ;;
+        esac
+        # shellcheck disable=SC2086 # 映射用空白分隔，这里就要按词拆
+        set -- $_m2_line
+        _m2_src=$1
+        _m2_primary=$2
+        shift 2
+        _m2_source="$_m2_fw_dir/$_m2_src"
+        case "$_m2_src" in
+            (apple/*|brcm/*) _m2_source="$_m2_fw_dir/vendorfw/$_m2_src" ;;
+        esac
+        [ -s "$_m2_source" ] || { printf '缺少 J413 固件：%s\n' "$_m2_source" >&2; return 1; }
+        if [ -n "$_m2_fw_dest" ]; then
+            install -Dm644 "$_m2_source" "$_m2_fw_dest/$_m2_primary" || return 1
+            for _m2_alias in "$@"; do
+                mkdir -p "$_m2_fw_dest/${_m2_alias%/*}" || return 1
+                ln -sfn "${_m2_primary##*/}" "$_m2_fw_dest/$_m2_alias" || return 1
+            done
+        fi
+        _m2_checksum=$(sha256sum "$_m2_source") || return 1
+        printf '%s  usr/lib/firmware/%s\n' "${_m2_checksum%% *}" "$_m2_primary"
+        for _m2_alias in "$@"; do
+            printf 'symlink:%s  usr/lib/firmware/%s\n' "${_m2_primary##*/}" "$_m2_alias"
+        done
+    done < "$M2_BOOT_DIR/wireless-firmware"
+    for _m2_fw in apple/tpmtfw-j413.bin regulatory.db regulatory.db.p7s; do
         _m2_fw_source="$_m2_fw_dir/$_m2_fw"
         case "$_m2_fw" in
             (apple/*|brcm/*) _m2_fw_source="$_m2_fw_dir/vendorfw/$_m2_fw" ;;
         esac
         [ -s "$_m2_fw_source" ] || { printf '缺少 J413 固件：%s\n' "$_m2_fw_source" >&2; return 1; }
-        if [ -n "${1:-}" ]; then
-            install -Dm644 "$_m2_fw_source" "$1/$_m2_fw" || return 1
+        if [ -n "$_m2_fw_dest" ]; then
+            install -Dm644 "$_m2_fw_source" "$_m2_fw_dest/$_m2_fw" || return 1
         fi
         _m2_checksum=$(sha256sum "$_m2_fw_source") || return 1
         printf '%s  usr/lib/firmware/%s\n' "${_m2_checksum%% *}" "$_m2_fw"

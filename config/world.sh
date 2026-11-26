@@ -1,11 +1,21 @@
 #!/bin/sh
 # Shared world declaration. The caller supplies the config directory and platform.
+# $3 = 架构（config/arch 里的 ARCH）。bare-metal 的 vendor 包按架构分片声明：
+# `world.bare-metal` 放架构中立包，`world.bare-metal.$ARCH` 放 vendor 相关包。
+# 缺省按 arm64（L1 目标架构）判定，避免把 x86 微码写进 arm64 的 @ordo-core。
 ordo_world() {
+    _ordo_confdir=$1
+    _ordo_arch=${3:-${ORDO_ARCH:-${ARCH:-arm64}}}
     case "$2" in
-        m2) set -- "$1/world" "$1/platform/m2/world.base" ;;
-        m2-native) set -- "$1/world" "$1/platform/m2/world.base" "$1/platform/m2/world" ;;
-        vm) set -- "$1/world" ;;
-        bare-metal) set -- "$1/world" "$1/world.bare-metal" ;;
+        m2) set -- "$_ordo_confdir/world" "$_ordo_confdir/platform/m2/world.base" ;;
+        m2-native) set -- "$_ordo_confdir/world" "$_ordo_confdir/platform/m2/world.base" "$_ordo_confdir/platform/m2/world" ;;
+        vm) set -- "$_ordo_confdir/world" ;;
+        bare-metal)
+            set -- "$_ordo_confdir/world" "$_ordo_confdir/world.bare-metal"
+            if [ -f "$_ordo_confdir/world.bare-metal.$_ordo_arch" ]; then
+                set -- "$@" "$_ordo_confdir/world.bare-metal.$_ordo_arch"
+            fi
+            ;;
         *) return 2 ;;
     esac
     LC_ALL=C awk '

@@ -4,7 +4,7 @@ Ordo 用 **fcitx5 + rime**，且只有这一条路径（ibus 已移除）。
 
 ## 应该是什么体验
 
-1. 登录后直接按 `Mod+Space` 打开启动器，输入 `zhongwen`
+1. 登录后直接按 `Mod+S` 打开启动器，输入 `zhongwen`
 2. 应该出现拼音候选框，能选字
 
 候选框不出现，先做这两件事：
@@ -62,8 +62,8 @@ fcitx5-remote -m      # 应该打印当前输入法名
 ls /usr/share/rime-data/ 2>/dev/null | head
 
 # 2. 是不是只有 GTK 应用不行（X11 应用另说）
-wezterm               # 在终端里试
-nautilus              # 在 GTK 应用里试
+wezterm                                # 在终端里试
+flatpak run org.mozilla.firefox        # 在 GTK 应用里试（首启已装）
 
 # 3. rime 的 schema 有没有部署
 fcitx5 -d --replace --verbose 2>&1 | head -30

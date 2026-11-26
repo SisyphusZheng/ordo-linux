@@ -108,6 +108,7 @@ tar -C "$base" --one-file-system --numeric-owner --acls --xattrs --xattrs-includ
     tar -C "$root" --numeric-owner --acls --xattrs --xattrs-include='*' -xpf -
 mkdir -p "$root/opt/ordo/config/platform/utm"
 cp -a "$vm_config/." "$root/opt/ordo/config/platform/utm/"
+install -m 644 "$platform_config/../desktop/keyring-policy.sh" "$root/opt/ordo/config/desktop/"
 install -m 755 "$platform_config/m2/repair-package-defaults.py" "$root/opt/ordo/config/platform/m2/"
 mkdir -p "$root"/{boot,dev,efi,home,proc,run,sys}
 mount -t vfat "$esp" "$root/efi"

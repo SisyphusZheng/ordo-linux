@@ -1,0 +1,4 @@
+gnome-base/gvfs elogind udev udisks -gcr -keyring -systemd
+# Use the UDisks GIO monitor without reintroducing desktop secret storage.
+sys-fs/udisks daemon elogind -systemd
+# D-Bus activates the storage daemon and elogind identifies the desktop seat.

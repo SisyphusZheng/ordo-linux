@@ -22,7 +22,16 @@ files = ["noctalia.toml"]
 # 启动时拉起：Noctalia 外壳 + 输入法（fcitx5 走 text-input-v3，无需 immodule）。
 # 缺 fcitx5：中文输入只在手动拉起后可用，新登录会话直接没有输入法
 # （2026-11-22 实机事故：autostart 只写了 noctalia，fcitx5 靠手工起）。
-autostart = ["noctalia", "fcitx5", "sh -c 'test ! -x /usr/local/bin/ordo-m2-hardware || exec /usr/local/bin/ordo-m2-hardware --session-report'"]
+#
+# 一条在合成器 socket 就绪后才跑：此时 WAYLAND_DISPLAY 才存在，执行
+# ordo-session-env 会把完整会话环境补写进 D-Bus activation environment，
+# 否则 portal 经 D-Bus 拉起后找不到合成器（source 时只能同步已就绪的变量）。
+autostart = [
+    "noctalia",
+    "fcitx5",
+    "sh -c '. /usr/local/bin/ordo-session-env && ordo_session_activate_environment'",
+    "sh -c 'test ! -x /usr/local/bin/ordo-m2-hardware || exec /usr/local/bin/ordo-m2-hardware --session-report'",
+]
 # 保留 XWayland
 xwayland = true
 # 模态对话框挂在父窗口上

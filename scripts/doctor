@@ -160,7 +160,7 @@ else
                 sub(/[[:space:]]*#.*/, "", x); sub(/^[[:space:]]+/, "", x)
                 sub(/[[:space:]]+$/, "", x)
                 sub(/::.*/, "", x)          # 剥 ::repo 来源
-                sub(/:[^/]*$/, "", x)       # 剥 :slot
+                sub(/:.*$/, "", x)       # 剥 :slot
                 return x
             }
             {
@@ -177,11 +177,13 @@ else
     # deselect ≠ 卸载：world 文件干净不代表系统干净——emerge --deselect 之后、
     # depclean 之前的窗口期里禁入包二进制仍在盘上（2026-11-22 对抗审计实证）。
     # 扫 /var/db/pkg 实际安装集，单次 awk 读两份输入，避免逐包 fork。
+    # 【P2-09】forbidden-world 必须作为 awk 的第一个文件传入：
+    # 只给 -v 变量时 FNR==NR 对每一行都成立，主规则永不执行（旧版假绿灯）。
     _hits="$(find /var/db/pkg -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
         | sed 's|^/var/db/pkg/||' \
-        | awk -v badf="$CONF_DIR/forbidden-world" '
+        | awk '
             function norm(x) {
-                sub(/::.*/, "", x); sub(/:[^/]*$/, "", x)
+                sub(/::.*/, "", x); sub(/:.*$/, "", x)
                 gsub(/^[[:space:]]+|[[:space:]]+$/, "", x)
                 return x
             }
@@ -192,7 +194,11 @@ else
             }
             {
                 b = $0
-                for (j = 1; j <= m && !skip; j++) {
+                # 【P2-09】skip 必须逐行复位：旧版一旦命中 `!` 豁免就永久
+                # 为 1，find 顺序靠前的豁免包会让后面的禁入包全部漏报。
+                skip = 0
+                hit = 0
+                for (j = 1; j <= m; j++) {
                     e = al[j]
                     if (b == e || (index(b, e) == 1 && substr(b, length(e)+1, 1) == "-")) skip = 1
                 }
@@ -201,16 +207,22 @@ else
                     e = fb[i]
                     if (e ~ /\/\*$/) {
                         c = e; sub(/\/\*$/, "", c)
-                        if (index(b, c "/") == 1) { print b; exit }
+                        if (index(b, c "/") == 1) { hit = 1; break }
                     } else if (b == e || (index(b, e) == 1 && substr(b, length(e)+1, 1) == "-")) {
-                        print b; exit
+                        hit = 1; break
                     }
                 }
-            }')"
+                # 不用 exit：所有禁入包都要报，只报第一个等于漏报。
+                if (hit) print b
+            }' "$CONF_DIR/forbidden-world" -)"
     if [ -n "$_hits" ]; then
-        printf '%s\n' "$_hits" | while IFS= read -r _p; do
+        # 不用管道：管道里的 while 在子 shell 中跑，bad 的 n_bad 计数会丢，
+        # 结果打印了 ✘ 却以 0 退出（假绿灯）。这里用 here-doc 留在本 shell。
+        while IFS= read -r _p; do
             bad "已安装禁入包: $_p（deselect ≠ 卸载；doas emerge --depclean 收尾）"
-        done
+        done <<EOF
+$_hits
+EOF
         found=1
     fi
     if [ "$found" -eq 0 ]; then ok "world 与已安装包均无应用级大件"; fi
@@ -295,6 +307,8 @@ fi
 # 12) 登录管理器 —— 配置值与实际安装/运行的进程必须一致
 #     install.sh §14a 只写 /etc/conf.d/display-manager 并启用 display-manager 服务；
 #     若 DISPLAYMANAGER 指向的 DM 没装或没在跑，开机就只有黑屏。
+#     M2/VM 走 greetd 自带 initd（provide display-manager），安装器不写这份
+#     conf；此时按平台判 greetd 是否进了 runlevel，不能误报「无图形登录界面」。
 if [ -r /etc/conf.d/display-manager ]; then
     dm="$(sed -n 's/^[[:space:]]*DISPLAYMANAGER="\{0,1\}\([^"]*\)"\{0,1\}.*$/\1/p' \
         /etc/conf.d/display-manager 2>/dev/null | tail -1)"
@@ -312,6 +326,18 @@ if [ -r /etc/conf.d/display-manager ]; then
         bad "配置 DISPLAYMANAGER=\"${dm}\"，但未见 ${dm} 进程（display-manager 服务未起来？）"
         bad "  排查：rc-service display-manager status; rc-update show default | grep display-manager"
     fi
+elif [ -f /etc/init.d/greetd ]; then
+    case "$(cat /etc/ordo/platform 2>/dev/null || :)" in
+        m2|m2-native|vm)
+            if [ -L /etc/runlevels/default/greetd ]; then
+                ok "登录管理器 greetd（自有 initd，无 display-manager 包装脚本）"
+            else
+                bad "greetd 未加入 default runlevel（图形登录不会启动）"
+                bad "  修复：rc-update add greetd default"
+            fi ;;
+        *)
+            warn "缺少 /etc/conf.d/display-manager（无图形登录界面）" ;;
+    esac
 else
     warn "缺少 /etc/conf.d/display-manager（无图形登录界面）"
 fi

@@ -57,11 +57,22 @@ assert_eq "${bad_var:-}" "" "README 列出的目录真实存在"
 case_name "已删除的模块不再出现在文档命令里"
 
 bad_doc=""
-for stale in 'apply kde' 'ordo rollback' 'ORDO_REAL_HARDWARE'; do
+for stale in 'apply kde' 'ordo rollback' 'ORDO_REAL_HARDWARE' \
+             'Mod+Space' '中文 GDM' 'ordo-wallpaper' 'ordo-portal-start' \
+             'warehouse-launch' 'nautilus'; do
     hits="$(grep -rln "$stale" "$ROOT"/README.md "$ROOT"/docs/manual "$ROOT"/CONTRIBUTING.md 2>/dev/null)"
     [ -n "$hits" ] && bad_doc="$bad_doc ${stale}→$hits"
 done
 assert_eq "$bad_doc" "" "用户文档不再教失效命令"
+
+case_name "发布手册包含验签步骤"
+
+assert_contains "$(cat "$ROOT/docs/manual/10-m2-external.md")" "ssh-keygen -Y verify" \
+    "M2 手册教 ssh-keygen 验签"
+assert_contains "$(cat "$ROOT/docs/manual/10-m2-external.md")" "allowed_signers" \
+    "M2 手册给出信任锚"
+assert_contains "$(cat "$ROOT/docs/manual/11-utm.md")" "UTM-SHA256SUMS" \
+    "UTM 手册给出摘要清单"
 
 case_name "版本号单一来源"
 

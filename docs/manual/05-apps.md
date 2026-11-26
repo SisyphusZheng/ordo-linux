@@ -20,30 +20,27 @@ ordo app list                            # 看装了哪些
 flatpak run org.mozilla.firefox          # 运行
 ```
 
-也可以从桌面启动器（`Mod+Space`）搜索应用名。
+也可以从桌面启动器（`Mod+S`）搜索应用名。
 
 ## 图形化商店：Warehouse
 
 ```sh
-warehouse-launch      # 或从启动器搜 "Warehouse"
+flatpak run io.github.flattool.Warehouse   # 或从启动器（Mod+S）搜 "Warehouse"
 ```
 
 能浏览、搜索、安装 Flatpak 应用。
 
-> **为什么需要 `warehouse-launch` 这个包装脚本**：直接 `flatpak run` 时，
-> bwrap 找不到相对命令名，必须用 `--command=/app/bin/warehouse` 绝对路径；
-> 而且它必须在标准会话总线（`/run/user/1000/bus`）上跑才能激活
-> `org.freedesktop.Flatpak` 服务。这两个坑都写在包装脚本里了。
-
 ## 首启装了哪些
 
-`config/apps.d/00-core.list` 里的三件事：
+`config/apps.d/00-core.list` 里的两件事：
 
 | 应用 | 为什么在 core |
 |---|---|
 | Firefox | 没有浏览器的系统不算能用 |
-| Luciole | 图形文件管理（系统层，随桌面一起装） |
 | Warehouse | 宪法要求"可视化 Flatpak 商店" |
+
+Luciole 不在应用清单里：它是系统层的 `gui-apps/luciole`（见 `config/world`），
+随桌面一起装，同时承担门户的文件选择器。
 
 可选应用在 `config/apps.d/01-optional.list`，按需 `ordo app install`。
 

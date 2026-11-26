@@ -1,0 +1,4 @@
+# Keep the desktop client library without a bundled Secret Service provider.
+app-crypt/libsecret::gentoo
+gnome-base/gnome-keyring
+virtual/secret-service

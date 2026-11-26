@@ -8,6 +8,11 @@
 gui-apps/luciole/
 ├── Manifest
 └── luciole-0.1.0.ebuild
+
+app-crypt/libsecret/
+├── Manifest
+├── files/                上游补丁
+└── libsecret-0.21.8.2-r100.ebuild
 ```
 
 ## luciole
@@ -39,3 +44,10 @@ overlay/
     ├── <pkg>-<ver>.ebuild
     └── files/                随源码安装的附属文件（如 initd 脚本）
 ```
+
+## libsecret
+
+Ordo 保留桌面程序依赖的 libsecret 客户端库。
+本地 `0.21.8.2-r100` 来自 Gentoo `5612e759ddbb58ff224546966df19866d460a93f` 的 `0.21.8.2-r1`。
+沿用原许可和源码，移除自动安装 Secret Service 服务的 `PDEPEND`。补丁随上游
+**LGPL-2.1** 分发，全文见 `licenses/LGPL-2.1.txt`。升级配方时重新校验 Manifest 和无密钥服务的依赖闭包。

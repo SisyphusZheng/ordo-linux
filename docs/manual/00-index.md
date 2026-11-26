@@ -13,7 +13,7 @@
 | [04 中文输入](04-input-method.md) | fcitx5 + rime，候选框不出来怎么办 |
 | [05 应用与商店](05-apps.md) | Flatpak 装应用、Warehouse 商店、为什么不用 pacman |
 | [06 升级与回滚](06-upgrade-rollback.md) | `ordo sysup`、快照、以及"升级炸了怎么办" |
-| [07 配置与主题](07-config-theme.md) | `ordo config`、`ordo theme`、改成你喜欢的样子 |
+| [07 配置与主题](07-config-theme.md) | `ordo config`、配色与壁纸、改成你喜欢的样子 |
 | [08 故障排查](08-troubleshooting.md) | 黑屏/无输入法/无声音/进不去系统 |
 | [09 x86 真机安装](09-x86-install.md) | 在 Intel/AMD 机器上装（走官方 ISO 路径）|
 | [10 M2 外接盘安装](10-m2-external.md) | 重建安装介质、首启桌面和回滚 |

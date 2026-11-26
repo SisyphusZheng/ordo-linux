@@ -161,3 +161,9 @@ xwayland-satellite/yazi 的条目已随包一起失效。
 | 63 | 配色不再有独立配置文件 | Noctalia 从壁纸提取调色板，`themes/` 与 `ordo-theme` 已删除 | 接受。换壁纸即换配色 |
 | 64 | `install.sh` 必须显式 `chmod -R a+rX /opt/ordo/config` | `cp` 会带回源文件的 0600，而桌面配置以软链部署 | **已修**。软链方案的前提。2026-11-22 起部署规程升级为 config/ + scripts/ 双目录 rsync：config 用 `--chmod=Du=rwx,Dgo=rx,Fu=rw,Fgo=r`（归一 644，一步解决属主与 0600），scripts 必须用 `Fu=rwx,Fgo=rx`——用 config 的 chmod 推 scripts 会剥掉可执行位（实测 doctor Permission denied），完整命令见 `config/desktop/README.md`「部署到实机」一节 |
 | 65 | `ffplay` 由 `config/desktop/ffplay` 替身提供 | pomodoro 插件声明 ffplay 依赖（bar widget 实例化的门禁）；真 ffplay 属 ffmpeg 的 `sdl` USE（→ GTK3，与 `-sdl` 审计冲突）。替身剥掉 ffplay 三个 flag 转给 pipewire 自带 `pw-play`（`pipewire` 开 `extra` USE）。插件默认走 noctalia 原生音效 API，仅 `use-bundled-alarm-sound = true` 才真正调用 | ffmpeg 出非 SDL 的 ffplay，或上游改用原生音效 |
+
+### libsecret 客户端与 Secret Service 分开安装
+
+Gentoo 的 libsecret 配方在安装客户端库后选择一个 Secret Service 提供者，现有桌面镜像由此装入 GNOME Keyring。Ordo 本地配方取消这条安装后依赖，保留客户端库。Pinentry 使用终端或 Qt 界面，关闭依赖 GNOME Keyring 的 GTK 后端。默认桌面没有全局密钥服务，依赖该服务的程序无法用它跨会话恢复凭据。
+
+若 Gentoo 提供可关闭该依赖的 USE 开关，可收回本地配方。核对 Portage 闭包、greetd PAM、D-Bus 激活文件和首启桌面后再切回上游。

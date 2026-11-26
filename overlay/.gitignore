@@ -1,2 +1,2 @@
-gui-apps/*/Manifest
-!gui-apps/luciole/Manifest
+# 不忽略 overlay 内任何 Manifest：新增覆盖包时清单必须随包入库。
+# tests/lint.sh 统计 gui-apps 每个包的 Manifest，tests/cases/200 核对本文件不再含忽略规则。

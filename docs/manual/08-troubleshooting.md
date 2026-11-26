@@ -36,11 +36,13 @@ Noctalia 的常见坑：
 ## 没有壁纸
 
 ```sh
-ls /usr/share/backgrounds/ordo/       # 图片在不在
-/usr/local/bin/ordo-wallpaper; echo $?  # 手动跑，看报错
+ls /usr/share/backgrounds/ordo/                 # 图片在不在
+grep -n '^path' ~/.config/noctalia/config.toml  # 默认壁纸指向哪张
 ```
 
-`ordo-wallpaper` 找不到图时输出错误并退出，不静默跳过。
+壁纸由 Noctalia 管理，换壁纸见 [07 配置与主题](07-config-theme.md)。图片缺失说明
+安装时没有铺到 `/usr/share/backgrounds/ordo/`，从仓库 `config/desktop/wallpapers/`
+取对应文件。
 
 ## 中文打不出来
 
@@ -67,12 +69,12 @@ OpenRC 下 pipewire 由会话脚本或 D-Bus 激活拉起。如果 `wpctl` 报�
 portal 的 Settings 接口没通：
 
 ```sh
-pgrep -f xdg-desktop-portal
-cat ~/.config/xdg-desktop-portal/portals.conf    # 应该 default=gtk
+pgrep -af xdg-desktop-portal
+busctl --user introspect org.freedesktop.portal.Desktop /org/freedesktop/portal/desktop
 ```
 
-`ordo-portal-start` 会在会话里拉起它；如果它没跑，Flatpak 应用拿不到
-系统主题，全部回退默认灰色。
+门户由 Umbriel 拉起。不要手写 `~/.config/xdg-desktop-portal/portals.conf`：
+仓库不部署这个文件，抄一条 `default=gtk` 会把文件选择器从 Luciole 拿走。
 
 ## 磁盘满了 / 快照占太多
 
@@ -101,3 +103,10 @@ umbriel config validate   # 校验 TOML
 
 给三样：**能复现的命令** + **实际输出** + **期望输出**。
 提交前先查阅 `docs/deviations.md`，其中记录了已确认的非常规行为。
+
+## 外接盘和空家目录
+
+在终端运行 `ls -a` 可看到当前目录的隐藏文件，`ls /` 可查看系统根目录。
+Luciole 通过 GIO 的 UDisks 卷监视器列出可识别的外接卷。插盘后用 `lsblk -f` 核对。若设备已出现但卷标或挂载入口缺失，用 `udisksctl status` 检查桌面存储服务。
+
+M2 Air 的会话硬件报告位于 `~/.local/state/ordo/m2-hardware.log`。它记录 NetworkManager 接口状态和蓝牙控制器的电源状态。扫描蓝牙设备时，配件需要进入配对模式。

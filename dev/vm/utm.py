@@ -50,7 +50,7 @@ def configuration(version):
         },
         "Display": [
             {
-                "Hardware": "virtio-ramfb",
+                "Hardware": "virtio-ramfb-gl",
                 "DynamicResolution": False,
                 "UpscalingFilter": "Linear",
                 "DownscalingFilter": "Linear",

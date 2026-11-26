@@ -25,3 +25,17 @@ if [ -d /etc/ordo ] && [ "$(readlink -f /etc/ordo)" != /opt/ordo/config ]; then
 fi
 rc-update add greetd default
 test -L /etc/runlevels/default/greetd
+
+# 首启应用清单（P1-04）：M2 路径过去不读 config/apps.d，装完没有浏览器与商店。
+# 安装器不假设联网，只登记 local.d 一次性任务；首启由 ordo 用户装清单里的应用。
+install -m 755 /opt/ordo/config/platform/m2/first-apps.sh /usr/local/sbin/ordo-first-apps
+# oneshot 只有在 local 进了默认 runlevel 才会跑
+if [ -x /etc/init.d/local ]; then
+    rc-update add local default
+fi
+install -d -m 755 /etc/local.d
+cat > /etc/local.d/70-ordo-first-apps.start <<'FIRSTAPPS'
+#!/bin/sh
+exec /usr/local/sbin/ordo-first-apps
+FIRSTAPPS
+chmod 755 /etc/local.d/70-ordo-first-apps.start

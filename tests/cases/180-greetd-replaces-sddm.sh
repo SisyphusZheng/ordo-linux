@@ -63,8 +63,9 @@ assert_not_contains "$_install" "/usr/share/sddm/themes" "不再部署 SDDM 主�
 case_name "greeter 已登记 keyword 例外"
 
 _kw="$(cat "$ROOT/config/package.accept_keywords/desktop")"
-assert_contains "$_kw" "gui-apps/tuigreet" "tuigreet 有 keyword 例外"
 assert_contains "$_kw" "gui-libs/greetd" "greetd 有 keyword 例外"
+# tuigreet 已退场：world / 平台包集都不含它，keyword 例外是死配置（P2-11）。
+assert_not_contains "$_kw" "gui-apps/tuigreet" "tuigreet 的 keyword 例外已删除"
 
 case_name "world 不引入 Qt 依赖链"
 

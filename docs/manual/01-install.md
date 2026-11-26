@@ -9,7 +9,7 @@
 ping -c1 mirrors.ustc.edu.cn
 
 # 2. 拿到仓库
-git clone https://github.com/SisyphusZheng/ordo-linux /root/ordo
+git clone https://github.com/ordo-linux/ordo /root/ordo
 cd /root/ordo
 
 # 3. 装（会抹掉目标磁盘，需输入 yes 确认）

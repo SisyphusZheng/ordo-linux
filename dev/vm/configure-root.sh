@@ -8,6 +8,8 @@ desktop=$repo/config/desktop
 vm=$repo/config/platform/utm
 release=$1
 
+sh "$desktop/keyring-policy.sh" check
+
 for program in umbriel start-umbriel noctalia noctalia-greeter-session greetd dbus-uuidgen setsid chvt; do
     command -v "$program" >/dev/null
 done

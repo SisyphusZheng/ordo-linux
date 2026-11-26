@@ -61,7 +61,13 @@ _declared_world() {
     # shellcheck source=config/world.sh
     . "$CONF_DIR/world.sh"
     _platform=$(ordo_platform) || return 2
-    ordo_world "$CONF_DIR" "$_platform"
+    # 架构参与声明：bare-metal 的 vendor 包按 ARCH 分片（config/world.bare-metal.$ARCH）。
+    # arch 文件缺失/不可解析时传空串，由 world.sh 退回默认架构（arm64）。
+    _arch=''
+    if [ -r "$CONF_DIR/arch" ]; then
+        _arch=$( (. "$CONF_DIR/arch" && printf '%s' "$ARCH") 2>/dev/null || true )
+    fi
+    ordo_world "$CONF_DIR" "$_platform" "$_arch"
 }
 
 _actual_world() {
@@ -109,6 +115,93 @@ _compare_world() {
         LC_ALL=C comm -13 "$_world_tmp/expected" "$_world_tmp/selected" > "$_world_tmp/extra" || return 2
     fi
     LC_ALL=C comm -23 "$_world_tmp/expected" "$_world_tmp/selected" > "$_world_tmp/missing"
+}
+
+# ---------- 构建清单（P1-02）----------
+# 旧版的期望值来自运行机的 /opt/ordo/config，而实机 world 又由同一份副本
+# 派生 —— 两边同源，verdict 恒绿。现在期望值来自 install.sh 装机时写下的
+# /etc/ordo/build-manifest：逐文件的 sha256（声明副本）与部署产物摘要。
+# 清单缺失/格式未知 = 无法判定（退出码 2），绝不当作通过。
+_manifest_field() {  # key file
+    awk -v key="$1" '$1 == key { print $2; exit }' "$2"
+}
+
+_verify_build_manifest() {
+    # 清单所在的 /etc/ordo 由安装介质建立。目录都不存在 = 这不是装机布局
+    # （开发树 / 测试沙箱），没有「装机副本」可核对，报 info 即可；
+    # 已装机却缺清单（升级自旧镜像）必须 exit 2 —— 这正是 P1-02 的场景。
+    if [ ! -d "${ORDO_BUILD_MANIFEST%/*}" ]; then
+        info "非装机布局（无 ${ORDO_BUILD_MANIFEST%/*}），跳过构建清单核对"
+        return 0
+    fi
+    if [ ! -r "$ORDO_BUILD_MANIFEST" ]; then
+        skip_inc "无构建清单 ${ORDO_BUILD_MANIFEST}：无法判定装机声明是否与本次构建同源（不是通过）"
+        return 0
+    fi
+    if [ "$(_manifest_field manifest_version "$ORDO_BUILD_MANIFEST")" != 1 ]; then
+        skip_inc "构建清单格式未知（manifest_version 缺失）：无法判定（不是通过）"
+        return 0
+    fi
+
+    # 1) 版本：构建清单 = 装机 version 文件；有 os-release 时一并核对
+    _mf_version=$(_manifest_field version "$ORDO_BUILD_MANIFEST")
+    _ver_installed=$(cat "$ORDO_ROOT/version" 2>/dev/null || true)
+    if [ -z "$_mf_version" ]; then
+        skip_inc "构建清单缺 version 行：无法判定（不是通过）"
+    elif [ "$_ver_installed" != "$_mf_version" ]; then
+        bad_inc "装机版本 ${_ver_installed:-缺失} 与构建清单 ${_mf_version} 不一致"
+    else
+        if [ -r /etc/os-release ]; then
+            _ver_osrel=$(awk -F= '$1 == "VERSION_ID" { gsub(/"/, "", $2); print $2; exit }' /etc/os-release 2>/dev/null || true)
+            # os-release 的 VERSION_ID 是去掉 -rc1 之类后缀的基线，与清单同口径比。
+            if [ -n "$_ver_osrel" ] && [ "$_ver_osrel" != "${_mf_version%%-*}" ]; then
+                bad_inc "os-release VERSION_ID=${_ver_osrel} 与构建清单 ${_mf_version} 不一致"
+            fi
+        fi
+        info "版本 ${_mf_version}"
+    fi
+
+    # 2) 声明副本（decl）与部署产物（copy）：清单里每一行都必须对得上
+    _mf_n=0
+    _mf_bad=0
+    # 最后一行没有换行时也要处理（read 在 EOF 无换行时返回非零）。
+    while read -r _kind _sha _path _dst || [ -n "$_kind" ]; do
+        case "$_kind" in
+            decl)
+                _mf_n=$((_mf_n + 1))
+                if [ ! -f "$_path" ]; then
+                    bad_inc "声明副本缺失：$_path"
+                    _mf_bad=1
+                elif _now=$(ordo_sha256 "$_path"); then
+                    if [ "$_now" != "$_sha" ]; then
+                        bad_inc "声明副本与构建清单不一致：$_path"
+                        _mf_bad=1
+                    fi
+                else
+                    skip_inc "无法计算摘要：$_path"
+                fi
+                ;;
+            copy)
+                _mf_n=$((_mf_n + 1))
+                if [ ! -f "$_dst" ]; then
+                    bad_inc "部署产物缺失：$_dst"
+                    _mf_bad=1
+                elif _now=$(ordo_sha256 "$_dst"); then
+                    if [ "$_now" != "$_sha" ]; then
+                        bad_inc "部署产物与构建清单不一致：$_dst（构建时取自 $_path）"
+                        _mf_bad=1
+                    fi
+                else
+                    skip_inc "无法计算摘要：$_dst"
+                fi
+                ;;
+        esac
+    done < "$ORDO_BUILD_MANIFEST"
+    if [ "$_mf_n" -eq 0 ]; then
+        skip_inc "构建清单没有可核对条目：无法判定（不是通过）"
+    elif [ "$_mf_bad" -eq 0 ]; then
+        ok "声明副本与部署产物均与构建清单一致（${_mf_n} 项）"
+    fi
 }
 
 # ---------- show ----------
@@ -200,6 +293,11 @@ cmd_show() {
 # ---------- verify ----------
 cmd_verify() {
     say "配置一致性检查"
+    echo ""
+
+    # 0) 构建清单：装机副本与部署产物是否与本次构建同源
+    echo "[0] 构建清单"
+    _verify_build_manifest
     echo ""
 
     # 1) dataset 配置 vs 运行系统
@@ -387,16 +485,65 @@ _apply_world() {
     if cmp -s "$_tmp" "$_set_file" 2>/dev/null; then
         rm -f "$_tmp"
         ok "$_set_file 已是最新（$(wc -l < "$_set_file" | tr -d ' ') 个 atom）"
-        info "安装或更新声明包：doas emerge --noreplace @ordo-core"
+    else
+        if ! chmod 644 "$_tmp" || ! mv -f "$_tmp" "$_set_file"; then
+            rm -f "$_tmp"
+            bad "无法写入 $_set_file"
+            return 1
+        fi
+        ok "已写入 ${_set_file}（$(wc -l < "$_set_file" | tr -d ' ') 个 atom）"
+    fi
+    # set 文件新旧都要保证「被选中」：否则写了文件也进不了 @world。
+    # m2-native 平台由 config/world.sh 并入 platform/m2/world，同时选中
+    # @ordo-m2 不改变声明内容；非原生平台不选（其声明未含原生包）。
+    _wants='@ordo-core'
+    if [ "${_platform:-}" = m2-native ] && [ -f "${_ordo_set%/*}/ordo-m2" ]; then
+        _wants="$_wants @ordo-m2"
+    fi
+    _apply_world_sets $_wants || return 1
+    info "安装或更新声明包：doas emerge --noreplace @ordo-core"
+    return 0
+}
+
+# 写入 /var/lib/portage/world_sets：**只有被选中的 set 才真正进入 @world**。
+# 【P2-11】旧版 _apply_world 只写 /etc/portage/sets/ordo-core，从不写
+# world_sets —— M2 的 install-external.sh 调完 apply world 就结束，
+# @ordo-core 从未被选中（emerge 时那只是一个文件），依赖 @world 的
+# depclean/升级路径也看不到声明。这里幂等补齐，已有其他 set 原样保留。
+_apply_world_sets() {
+    _sets_file=$_portage_sets
+    mkdir -p "${_sets_file%/*}" 2>/dev/null || true
+    _sets_tmp=$(mktemp "${TMPDIR:-/tmp}/.ordo-sets.XXXXXX") || { bad "无法创建临时文件"; return 1; }
+    if [ -e "$_sets_file" ]; then
+        if ! cat "$_sets_file" > "$_sets_tmp"; then
+            rm -f "$_sets_tmp"
+            bad "无法读取 $_sets_file（需要 root）"
+            return 1
+        fi
+    fi
+    _added=''
+    for _want in "$@"; do
+        if awk -v name="$_want" '{ sub(/#.*/, "") } $1 == name { found=1 } END { exit !found }' "$_sets_tmp"; then
+            continue
+        fi
+        if ! printf '%s\n' "$_want" >> "$_sets_tmp"; then
+            rm -f "$_sets_tmp"
+            bad "无法写入 $_sets_file（需要 root）"
+            return 1
+        fi
+        _added="$_added $_want"
+    done
+    if [ -z "$_added" ]; then
+        rm -f "$_sets_tmp"
+        info "$_sets_file 已选中：$*"
         return 0
     fi
-    if ! chmod 644 "$_tmp" || ! mv -f "$_tmp" "$_set_file"; then
-        rm -f "$_tmp"
-        bad "无法写入 $_set_file"
+    if ! chmod 644 "$_sets_tmp" || ! mv -f "$_sets_tmp" "$_sets_file"; then
+        rm -f "$_sets_tmp"
+        bad "无法写入 $_sets_file（需要 root）"
         return 1
     fi
-    ok "已写入 ${_set_file}（$(wc -l < "$_set_file" | tr -d ' ') 个 atom）"
-    info "安装或更新声明包：doas emerge --noreplace @ordo-core"
+    ok "已选中 Portage set${_added}（下次 emerge @world 生效）"
     return 0
 }
 
@@ -409,7 +556,10 @@ _apply_theme() {
 
 _apply_desktop() {
     # 把 config/desktop 的桌面资产部署到真实用户家目录。
-    # 用符号链接：改仓库文件即等于改生效配置，只有一份文件，没有副本。
+    # 默认用符号链接：改仓库文件即等于改生效配置，只有一份文件，没有副本。
+    # 例外：wezterm.lua 是**用户会原地编辑**的模板（见 docs/manual），
+    # 软链到 /opt/ordo/config（root:root）时写不进去 —— 实机报
+    # "touch wezterm.lua: 权限不够"，所以它必须落成用户属主的真实副本。
     _src="$CONF_DIR/desktop"
     [ -d "$_src" ] || { bad "找不到 $CONF_DIR/desktop"; return 1; }
 
@@ -423,8 +573,7 @@ _apply_desktop() {
 
     _n=0
     _failed=0
-    for _pair in "skel/.config/wezterm/wezterm.lua:wezterm/wezterm.lua" \
-                 "skel/.config/starship.toml:starship.toml" \
+    for _pair in "skel/.config/starship.toml:starship.toml" \
                  "umbriel/config.toml:umbriel/config.toml" \
                  "noctalia/config.toml:noctalia/config.toml" \
                  "luciole/config.toml:luciole/config.toml" \
@@ -443,8 +592,46 @@ _apply_desktop() {
             _n=$((_n + 1))
         fi
     done
+
+    # wezterm.lua：真实副本（旧版是软链，用户按手册改模板时只读）。
+    # 语义：副本 = 用户的文件。已是普通文件时保留内容（重装不吞用户改动），
+    # 只把属主交给家目录所有者；软链（旧版遗留）替换为声明副本；
+    # 缺失则新建。会话入口 ordo-umbriel-session 用同一语义兜底旧系统。
+    _wsrc="$_src/skel/.config/wezterm/wezterm.lua"
+    _wdst="$_cfgdir/wezterm/wezterm.lua"
+    _wok=1
+    if [ ! -f "$_wsrc" ]; then
+        bad "源文件不存在：$_wsrc"
+        _failed=1
+        _wok=0
+    elif [ -d "$_wdst" ] && [ ! -L "$_wdst" ]; then
+        bad "目标被目录占用：$_wdst"
+        _failed=1
+        _wok=0
+    elif [ -f "$_wdst" ] && [ ! -L "$_wdst" ]; then
+        info "wezterm/wezterm.lua 已存在（保留用户改动）"
+    elif ! mkdir -p "$(dirname "$_wdst")" || ! rm -f "$_wdst" || ! cp "$_wsrc" "$_wdst"; then
+        bad "写真实副本失败：$_wdst"
+        _failed=1
+        _wok=0
+    else
+        info "wezterm/wezterm.lua（真实副本，可原地编辑）"
+    fi
+    if [ "$_wok" -eq 1 ]; then
+        chmod 644 "$_wdst" 2>/dev/null || true
+        # 以 root 运行时副本必须归家目录属主，否则用户仍然改不动。
+        if [ "$(id -u)" -eq 0 ]; then
+            _owner=$(ls -ldn "$_real_home" 2>/dev/null | awk '{print $3":"$4}')
+            if [ -n "$_owner" ] && ! chown "$_owner" "$_wdst" 2>/dev/null; then
+                bad "无法把副本交给 $_owner：$_wdst"
+                _failed=1
+            fi
+        fi
+        _n=$((_n + 1))
+    fi
+
     [ "$_failed" -eq 0 ] || return 1
-    ok "已链接 ${_n} 个桌面配置文件到 $_cfgdir"
+    ok "已部署 ${_n} 个桌面配置文件到 $_cfgdir（wezterm.lua 为副本）"
 
 }
 

@@ -1,0 +1,10 @@
+# 真机专用包 — amd64 分片（由 config/world.sh 按 ARCH 合并）
+#
+# 只在 `ORDO_PLATFORM=bare-metal` 且 `ARCH=amd64` 时并入 @ordo-core。
+# arm64（Asahi）没有 x86 微码包 —— 声明在这里而不是 world.bare-metal，
+# 否则 arm64 真机会装进一个树里不存在的 x86 包。
+#
+# 微码必须写进 initramfs 才能在加载内核模块前生效（修 CVE 的前提）；
+# USE 由包自身的默认 IUSE 决定，这里不再复写。
+
+sys-firmware/intel-microcode

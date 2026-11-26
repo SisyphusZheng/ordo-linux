@@ -55,6 +55,26 @@ fi
 
 export POOL DATASET HOME_DATASET
 
+# 构建清单：install.sh 在装机结束前逐文件写下「声明副本 + 部署产物」的 sha256。
+# verify 的期望值只认这份清单 —— 拿运行机 /opt/ordo 里的旧副本自证，
+# 等于让装机副本给自己判卷（P1-02）。清单缺失 = 无法判定，不是通过。
+ORDO_BUILD_MANIFEST="${ORDO_BUILD_MANIFEST:-/etc/ordo/build-manifest}"
+export ORDO_BUILD_MANIFEST
+
+# sha256 摘要：Linux 用 sha256sum，BSD/macOS 用 shasum，再退回 openssl。
+# 三者都不可用时返回 2 —— 调用方必须把它当「无法判定」，不得当通过。
+ordo_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 "$1" | awk '{print $NF}'
+    else
+        return 2
+    fi
+}
+
 # 运行时根数据集。
 # 回滚后系统运行在 clone 上，此时 DATASET 指向的是未运行的旧系统。
 # 快照与属性操作的对象必须是 RUNNING_ROOT，不是 DATASET。

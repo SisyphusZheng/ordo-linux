@@ -110,13 +110,17 @@ if [ "$USB_PAYLOAD" = 1 ]; then
 @PAYLOAD_HASHES@
 ORDO_PAYLOAD_HASHES
 else
-    for file in kernel/vmlinuz-7.0.9-asahi-2 kernel/system-asahi.img kernel/vmlinuz-asahi.EFI kernel/modules.tar.gz; do
+    for file in "kernel/vmlinuz-$KERNEL_RELEASE" kernel/system-asahi.img kernel/vmlinuz-asahi.EFI kernel/modules.tar.gz; do
         [ -s "$PAYLOAD/$file" ] || die "缺少安装资料：$file"
     done
 fi
 for suffix in 00 01 02 03; do
     [ -s "$PAYLOAD/rootfs.tar.gz.part$suffix" ] || die "缺少 rootfs 分片 $suffix"
 done
+# 6.8 GB 解包前先核哈希：分片被改写必须在这里停住，而不是把坏数据铺进新池（P1-01）
+(cd "$PAYLOAD" && sha256sum -c -) <<'ORDO_ROOTFS_HASHES' || die "rootfs 分片校验失败"
+@ROOTFS_HASHES@
+ORDO_ROOTFS_HASHES
 [ -f "$hostid_file" ] && [ "$(wc -c < "$hostid_file" | tr -d ' ')" = 4 ] || die "hostid 不是 4 字节"
 if [ "$USB_PAYLOAD" != 1 ] && [ -f "$PAYLOAD/barefiles.tar.gz" ]; then
     (cd "$PAYLOAD" && echo "@BAREFILES_SHA@  barefiles.tar.gz" | sha256sum -c -) || die "真机软件包校验失败"
@@ -360,11 +364,36 @@ echo ordo > "$TARGET/etc/hostname"
 mkdir -p "$TARGET/opt/ordo"
 tar -xzf "$BOOT_MOUNT/desktop-@BUNDLE_SHA@.tar.gz" -C "$TARGET/opt/ordo"
 if [ "$USB_PAYLOAD" = 1 ]; then
-    luciole=overlay/gui-apps/luciole
-    for file in Manifest luciole-0.1.0.ebuild; do
-        install -Dm644 "$TARGET/opt/ordo/$luciole/$file" "$TARGET/var/db/repos/local/gui-apps/luciole/$file"
+    luciole="$TARGET/opt/ordo/overlay/gui-apps/luciole"
+    for file in "$luciole"/Manifest "$luciole"/*.ebuild; do
+        [ -f "$file" ] || die "本地 overlay 缺少 $(basename "$file")"
+        install -Dm644 "$file" "$TARGET/var/db/repos/local/gui-apps/luciole/${file##*/}"
     done
 fi
+# 固件请求名补齐（P1-03）：Apple 固件包只带源文件名，brcmfmac 按板型后缀请求。
+# 映射表与 dev/m2/build.py、boot-sync.sh、verify-hardware.sh 共读同一份。
+link_vendorfw() {
+    _map=$TARGET/opt/ordo/config/platform/m2/wireless-firmware
+    _root="$TARGET/lib/firmware/vendorfw"
+    [ -s "$_map" ] || die "缺少无线固件映射表"
+    [ -d "$_root" ] || die "缺少 Apple 固件目录"
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        _line=${_line%%#*}
+        case "$_line" in *[![:space:]]*) ;; *) continue ;; esac
+        set -- $_line
+        _source=$1
+        _primary=$2
+        shift 2
+        [ -s "$_root/$_source" ] || die "缺少 Apple 固件：$_source"
+        install -Dm644 "$_root/$_source" "$_root/$_primary"
+        for _alias in "$@"; do
+            mkdir -p "$_root/${_alias%/*}"
+            ln -sfn "${_primary##*/}" "$_root/$_alias"
+        done
+    done < "$_map"
+}
+link_vendorfw
+
 build_version=$(cat "$TARGET/opt/ordo/version")
 version=${build_version%%-*}
 printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || die "发行版本无效"
@@ -378,18 +407,22 @@ BUILD_ID=$version
 VERSION_ID=$version
 VERSION="$version (Ab Chao)"
 VERSION_CODENAME=ab-chao
-HOME_URL="https://github.com/SisyphusZheng/ordo-linux"
-SUPPORT_URL="https://github.com/SisyphusZheng/ordo-linux/issues"
-BUG_REPORT_URL="https://github.com/SisyphusZheng/ordo-linux/issues"
+HOME_URL="https://github.com/ordo-linux/ordo"
+SUPPORT_URL="https://github.com/ordo-linux/ordo/issues"
+BUG_REPORT_URL="https://github.com/ordo-linux/ordo/issues"
 OSREL
 ln -sfn /etc/os-release "$TARGET/usr/lib/os-release"
 if [ -z "$NATIVE_SHA" ]; then
-    sh "$TARGET/opt/ordo/config/platform/m2/install-display.sh" "$TARGET/lib/modules/7.0.9-asahi-2" \
+    sh "$TARGET/opt/ordo/config/platform/m2/install-display.sh" "$TARGET/lib/modules/$KERNEL_RELEASE" \
         "$TARGET/opt/ordo/dev/m2/display/modules.tar.gz"
 fi
 mount -t proc proc "$TARGET/proc" 2>/dev/null || true
 mount -t sysfs sysfs "$TARGET/sys" 2>/dev/null || true
 mount --bind /dev "$TARGET/dev" 2>/dev/null || true
+if [ "$USB_PAYLOAD" = 1 ]; then
+    policy=/opt/ordo/config/desktop/keyring-policy.sh
+    chroot "$TARGET" /bin/sh "$policy" check || die "发行根系统含旧版密钥服务"
+fi
 if [ -n "$NATIVE_SHA" ]; then
     for fs in proc sys dev; do mountpoint -q "$TARGET/$fs" || die "原生安装需要挂载 $fs"; done
     cp /etc/hostid "$TARGET/etc/hostid"
@@ -397,6 +430,9 @@ if [ -n "$NATIVE_SHA" ]; then
     chroot "$TARGET" /bin/sh /opt/ordo/config/platform/m2/install-native.sh "$KERNEL_RELEASE" "$root_id" || \
         die "原生内核、ZFS 或硬件软件包未通过验收"
     rm -rf "$NATIVE_FILES"
+fi
+if [ "$USB_PAYLOAD" = 1 ]; then
+    chroot "$TARGET" /bin/sh "$policy" check || die "硬件包引入了密钥服务"
 fi
 chroot "$TARGET" /bin/sh /opt/ordo/config/platform/m2/install-cli.sh || die "Ordo CLI 安装失败"
 if [ "$USB_PAYLOAD" = 1 ]; then
@@ -409,6 +445,13 @@ if [ "$USB_PAYLOAD" = 1 ]; then
     chroot "$TARGET" systemd-tmpfiles --create /etc/tmpfiles.d/noctalia-greeter.conf
     sed -i -E '/^[^#][^:]*:.*[[:space:]]tty1([[:space:]]|$)/s/^/# /' "$TARGET/etc/inittab"
     install -Dm755 "$TARGET/opt/ordo/config/zfs-arc.start" "$TARGET/etc/local.d/zz-zfs-arc.start"
+    for _set in @ordo-core @ordo-m2; do
+        [ -f "$TARGET/etc/portage/sets/${_set#@}" ] || continue
+        mkdir -p "$TARGET/var/lib/portage"
+        : >> "$TARGET/var/lib/portage/world_sets"
+        grep -Fxq "$_set" "$TARGET/var/lib/portage/world_sets" ||
+            printf '%s\n' "$_set" >> "$TARGET/var/lib/portage/world_sets"
+    done
     chroot "$TARGET" /bin/sh /opt/ordo/scripts/ordo-config apply world || die "无法启用平台包集"
     for service in dbus:default elogind:boot zfs-import:boot zfs-mount:boot \
         NetworkManager:default power-profiles-daemon:default chronyd:default cronie:default local:default; do
@@ -484,5 +527,8 @@ cp "$BOOT_MOUNT/extlinux/ordo-system.conf" "$BOOT_MOUNT/extlinux/ordo-system.new
 mv -f "$BOOT_MOUNT/extlinux/ordo-system.new" "$BOOT_MOUNT/extlinux/extlinux.conf"
 check_initial_efi
 mv -f "$BOOT_MOUNT/EFI/BOOT/ORDO.NEW" "$BOOT_MOUNT/EFI/BOOT/BOOTAA64.EFI"
+# NVRAM 写不进去时，EFI/BOOT/BOOTAA64.EFI 是唯一的引导入口，必须读回核对（P1-01）
+cmp -s "$BOOT_MOUNT/EFI/BOOT/BOOTAA64.EFI" "$BOOT_MOUNT/live/ordo-@DIRECT_SHA@.efi" ||
+    die "默认引导文件读回不一致：EFI/BOOT/BOOTAA64.EFI"
 sync
 say "外置盘已写入，池已导出。保留这块 USB 盘再从 Ordo Linux 启动。"

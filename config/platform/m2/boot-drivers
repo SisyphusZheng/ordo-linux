@@ -5,4 +5,5 @@ scsi_mod
 sd_mod
 appledrm
 brcmfmac
+brcmfmac-wcc
 hci_bcm4377

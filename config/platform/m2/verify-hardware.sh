@@ -27,6 +27,15 @@ if [ "$capture" = --session-report ]; then
         if [ "${ORDO_ASAHI_RENDER_NODE_TIMEOUT:-0}" = 1 ]; then
             printf '%s\n' '登录时等待可读写的 Asahi 渲染节点超时'
         fi
+        if command -v nmcli >/dev/null 2>&1; then
+            printf 'NetworkManager devices (type,state):\n'
+            LC_ALL=C timeout 5 nmcli -t -f TYPE,STATE device status || :
+        fi
+        if command -v bluetoothctl >/dev/null 2>&1; then
+            printf 'BlueZ controller state:\n'
+            LC_ALL=C timeout 5 bluetoothctl show |
+                awk '/^[[:space:]]*(Powered|PowerState|Discovering):/ {print}' || :
+        fi
         timeout 45 sh "$(readlink -f "$0")" || report_status=$?
         case "$report_status" in 0|1|2) ;; *) report_status=2 ;; esac
         printf 'exit=%s\n' "$report_status"
@@ -52,18 +61,49 @@ gpu() {
             */asahi) render=/dev/dri/${node##*/}; break ;;
         esac
     done
-    [ -n "$render" ] && [ -c "$render" ] || return 1
-    command -v eglinfo >/dev/null && [ -n "${WAYLAND_DISPLAY:-}" ] || return 2
-    egl=$(eglinfo -B 2>/dev/null) || [ -n "$egl" ] || return 2
-    printf '%s\n' "$egl" | awk '
+    if [ -z "$render" ] || [ ! -c "$render" ]; then
+        printf '  原因：没有绑定 asahi 驱动的渲染节点（AGX 未接管 GPU）\n' >&2
+        return 1
+    fi
+    if ! command -v eglinfo >/dev/null; then
+        printf '  原因：缺少 eglinfo（media-libs/mesa-progs），无法判定 EGL 后端\n' >&2
+        return 2
+    fi
+    if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+        printf '  原因：不在 Wayland 会话内（WAYLAND_DISPLAY 未设置）\n' >&2
+        return 2
+    fi
+    egl=$(eglinfo -B 2>/dev/null) || [ -n "$egl" ] || {
+        printf '  原因：eglinfo -B 无输出\n' >&2
+        return 2
+    }
+    if ! printf '%s\n' "$egl" | awk '
         /^Wayland platform:/ { wayland=1; next }
         /platform:$/ { wayland=0 }
         wayland && $0 ~ /EGL driver name: asahi/ { found=1 }
         END { exit !found }
-    ' || return 1
-    pid=$(pgrep -u "$(id -u)" -x umbriel) || return 2
-    [ -r "/proc/$pid/environ" ] || return 2
-    tr '\000' '\n' < "/proc/$pid/environ" | grep -Fxq "WLR_RENDER_DRM_DEVICE=$render"
+    '; then
+        # 报告必须能自己说明为什么红：留下 Wayland EGL 的关键行（P1-06）
+        printf '  原因：Mesa 的 Wayland EGL 驱动不是 asahi；eglinfo -B 关键行：\n' >&2
+        printf '%s\n' "$egl" | awk '
+            /^Wayland platform:/ { wayland=1; next }
+            /platform:$/ { wayland=0 }
+            wayland && /EGL driver name:|EGL vendor string:/ { printf "    %s\n", $0 }
+        ' >&2
+        return 1
+    fi
+    pid=$(pgrep -u "$(id -u)" -x umbriel) || {
+        printf '  原因：当前用户没有 umbriel 进程\n' >&2
+        return 2
+    }
+    [ -r "/proc/$pid/environ" ] || {
+        printf '  原因：读不到 umbriel 的环境（权限不足）\n' >&2
+        return 2
+    }
+    if ! tr '\000' '\n' < "/proc/$pid/environ" | grep -Fxq "WLR_RENDER_DRM_DEVICE=$render"; then
+        printf '  原因：Umbriel 的 WLR_RENDER_DRM_DEVICE 不是 %s（可能回落 pixman）\n' "$render" >&2
+        return 1
+    fi
 }
 
 audio() {
@@ -129,11 +169,58 @@ check() {
     fi
 }
 
-wireless() {
-    for radio in /sys/class/ieee80211/phy*; do
-        case "$(readlink "$radio/device/driver" 2>/dev/null)" in */brcmfmac) return 0 ;; esac
+# 映射表的第三处消费方：驱动请求名必须真的落在系统里（P1-03）。
+# 只按“源文件名存在”验收会让 boot-sync 假绿，这里按请求名逐个核对。
+firmware_ready() {
+    map=
+    for candidate in /opt/ordo/config/platform/m2/wireless-firmware /etc/ordo/wireless-firmware; do
+        [ -r "$candidate" ] && { map=$candidate; break; }
     done
-    return 1
+    if [ -z "$map" ]; then
+        printf '  待验：找不到 wireless-firmware 映射表，无法核对请求名\n' >&2
+        return 2
+    fi
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%%#*}
+        case "$line" in
+            *[![:space:]]*) ;;
+            *) continue ;;
+        esac
+        # shellcheck disable=SC2086 # 映射用空白分隔
+        set -- $line
+        shift
+        for wanted in "$@"; do
+            if [ ! -s "/lib/firmware/vendorfw/$wanted" ] && [ ! -s "/lib/firmware/$wanted" ]; then
+                printf '  原因：缺少驱动请求名对应的固件：%s\n' "$wanted" >&2
+                return 1
+            fi
+        done
+    done < "$map"
+    return 0
+}
+
+wireless() {
+    firmware_ready || return $?
+    radio=
+    for node in /sys/class/ieee80211/phy*; do
+        case "$(readlink "$node/device/driver" 2>/dev/null)" in
+            */brcmfmac) radio=$node; break ;;
+        esac
+    done
+    if [ -z "$radio" ]; then
+        printf '  原因：没有 brcmfmac 注册的无线网卡（固件没被请求到）\n' >&2
+        return 1
+    fi
+    # 固件请求失败后 brcmfmac 不会重试，只有内核日志能证明它真的起来了（P1-03）
+    if ! kernel_log=$(dmesg 2>/dev/null) || [ -z "$kernel_log" ]; then
+        printf '  待验：读不到内核日志（dmesg），无法排除固件请求失败\n' >&2
+        return 2
+    fi
+    if printf '%s\n' "$kernel_log" | grep -Eq 'brcmfmac.*failed with error -2'; then
+        printf '  原因：内核日志仍记录 brcmfmac 固件请求失败（error -2）\n' >&2
+        return 1
+    fi
+    return 0
 }
 
 bluetooth() {

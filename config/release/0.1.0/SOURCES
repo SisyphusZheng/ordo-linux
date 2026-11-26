@@ -1,0 +1,7 @@
+# 发布源码锚点 —— 0.1.0
+#
+# M2-SHA256SUMS 的签名只覆盖交付二进制摘要；这里把二进制包锚回源码提交，
+# 事后可从 binpkg 追溯到底层源码。数值必须与 overlay 配方一致
+# （tests/cases/354-release-source-anchor.sh 校验）。
+luciole_commit=bae75c541ce1d863438d013f1f157b0db85e87df
+luciole_distfile=luciole-0.1.0-bae75c541ce1d863438d013f1f157b0db85e87df.tar.gz

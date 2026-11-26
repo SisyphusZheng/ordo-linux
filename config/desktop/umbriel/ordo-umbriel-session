@@ -6,17 +6,43 @@
 # ordo-session-env 里，本脚本只做 Umbriel 特有的部分。
 set -eu
 
+# XDG_CURRENT_DESKTOP 必须在 source 之前就绪：ordo-session-env 结束时会
+# 把已设置的变量同步进 D-Bus activation environment（portal 靠它识别桌面）。
+export XDG_CURRENT_DESKTOP=Umbriel
+
 . /usr/local/bin/ordo-session-env
 
-export XDG_CURRENT_DESKTOP=Umbriel
+# wezterm 配置按手册要能原地编辑，Noctalia 的 wezterm 模板也会写色名。
+# 旧版 apply / 旧镜像把它软链到 root 只读的 /opt/ordo，实机报
+# "touch wezterm.lua: 权限不够"。会话入口在用户侧把它落成真实副本；
+# 已经是真实文件则保持原样，用户改过的内容不会被覆盖。
+_wz="${XDG_CONFIG_HOME:-$HOME/.config}/wezterm/wezterm.lua"
+if [ -L "$_wz" ]; then
+    if _wz_src=$(readlink -f "$_wz") && [ -r "$_wz_src" ] &&
+       install -m644 "$_wz_src" "$_wz.new" && mv -f "$_wz.new" "$_wz"; then
+        printf 'Ordo: wezterm 配置已落成用户可写副本（%s）\n' "$_wz"
+    else
+        rm -f "$_wz.new"
+        printf 'Ordo: 无法把 wezterm 配置落成可写副本（%s）\n' "$_wz" >&2
+    fi
+fi
+unset _wz _wz_src
+
+# Populate the user's XDG folder defaults before starting the file manager.
+if command -v xdg-user-dirs-update >/dev/null 2>&1; then
+    xdg-user-dirs-update || printf '%s\n' 'Ordo: XDG user directories could not be initialized' >&2
+else
+    printf '%s\n' 'Ordo: 缺少 xdg-user-dirs-update（x11-misc/xdg-user-dirs 未部署；XDG 目录不初始化）' >&2
+fi
 
 # 音频栈：pipewire + wireplumber。
 # 【必须后台化】gentoo-pipewire-launcher 末尾是 `exec /usr/bin/wireplumber`，
 # 它会一直前台阻塞；同步调用会让本脚本永远走不到最后一行的 exec 合成器，
 # 表现为：greetd 登录后黑屏卡死，tty1 上只剩 wireplumber（2026-11-23 实测，
 # 会话 shell 停在 do_wait，子进程是 wireplumber）。
-# 用户级 OpenRC（install.sh 14b 段启用的 user.ordo）已管理音频服务，
-# 这里只作兜底，故用 & 放到后台，不阻塞启动。
+# 用户级 OpenRC 的 user.ordo 实例启用时已管理音频服务；旧安装或没有
+# /etc/init.d/user 模板的机器上它并未启用，所以这里必须有兜底，
+# 故用 & 放到后台，不阻塞启动。
 gentoo-pipewire-launcher >/dev/null 2>&1 &
 
 # Umbriel 自己拉起 Noctalia（见 config.toml 的 general.autostart）。

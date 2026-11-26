@@ -34,7 +34,7 @@ passwd ordo
 # 1. 看系统健康
 ordo doctor
 
-# 2. 确认中文能打（按 Mod+Space 打开启动器，输入拼音试试）
+# 2. 确认中文能打（按 Mod+S 打开启动器，输入拼音试试）
 #    如果候选框不出来 → docs/manual/04-input-method.md
 
 # 3. 看看有哪些应用，装一个浏览器
@@ -56,3 +56,7 @@ ordo app install org.mozilla.firefox
 
 **重要**：仓库里的 `config/` 才是事实来源。手改 `~/.config` 后，
 `ordo config verify` 会告诉你漂移了，`ordo config apply desktop` 可以从仓库重新部署。
+
+## 应用保存的密码
+
+Ordo 默认不安装 GNOME Keyring。程序可使用自己的账号登录和存储功能。依赖系统 Secret Service 的程序可能需要重新输入凭据或只在当前会话记住登录。

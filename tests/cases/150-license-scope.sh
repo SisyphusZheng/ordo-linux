@@ -9,7 +9,8 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 case_name "许可证文件齐全"
 
-for f in LICENSE LICENSE-NOTES.md licenses/GPL-2.0.txt licenses/CC-BY-SA-4.0.txt; do
+for f in LICENSE LICENSE-NOTES.md licenses/GPL-2.0.txt licenses/CC-BY-SA-4.0.txt \
+         licenses/LGPL-2.1.txt licenses/CDDL-1.0.txt licenses/MIT.txt; do
     assert_rc "$([ -f "$ROOT/$f" ] && echo 0 || echo 1)" 0 "$f 存在"
 done
 
@@ -37,6 +38,9 @@ case_name "LICENSE-NOTES 说明了关键取舍"
 _notes="$(cat "$ROOT/LICENSE-NOTES.md")"
 assert_contains "$_notes" "为什么不是 MIT" "解释了为何弃用 MIT"
 assert_contains "$_notes" "CDDL" "说明了 ZFS 的 CDDL 不构成派生作品"
+assert_contains "$_notes" "LGPL-2.1" "overlay 补丁的 LGPL 义务已登记"
+assert_contains "$_notes" "overlay/" "overlay 的许可归属已登记"
+assert_contains "$_notes" "dev/" "dev/ 的许可归属已登记"
 assert_contains "$_notes" "曾经的错误" "记录了第三方素材的历史问题"
 
 finish

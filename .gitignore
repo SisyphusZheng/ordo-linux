@@ -21,7 +21,3 @@ dev/build/
 
 # Python bytecode from local build tools
 __pycache__/
-
-# Generated legacy driver inputs
-/dev/m2/display/modules.tar.gz
-/dev/m2/power/macsmc-power.ko
