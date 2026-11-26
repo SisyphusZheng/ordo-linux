@@ -24,10 +24,12 @@ export LIBSEAT_BACKEND="${LIBSEAT_BACKEND:-logind}"
 # Apple 的显示控制器和 AGX GPU 是两个 DRM 设备。用 AGX 做渲染，
 # 由 wlroots 自动选择拥有输出的 KMS 设备。
 if [ -z "${WLR_RENDERER:-}" ]; then
-    ordo_asahi_render_node() {
+    # 渲染节点按**驱动名**认，不按平台名认：macOS 上的 UTM 走 virtio_gpu，
+    # 真机走 asahi；两者都能提供 gles2。只认 asahi 时 VM 会静默退回 pixman。
+    ordo_render_node() {
         for _render in /sys/class/drm/renderD*; do
             case "$(readlink "$_render/device/driver" 2>/dev/null || :)" in
-                */asahi)
+                */asahi|*/virtio_gpu)
                     _node=/dev/dri/${_render##*/}
                     [ -r "$_node" ] && [ -w "$_node" ] || continue
                     printf '%s\n' "$_node"
@@ -37,9 +39,9 @@ if [ -z "${WLR_RENDERER:-}" ]; then
         done
         return 1
     }
-    for _mesa in /usr/lib*/dri/asahi_dri.so; do
-        [ -r "$_mesa" ] || continue
-        _node=$(ordo_asahi_render_node) || :
+    for _dri in /usr/lib*/dri/asahi_dri.so /usr/lib*/dri/virtio_gpu_dri.so; do
+        [ -r "$_dri" ] || continue
+        _node=$(ordo_render_node) || :
         # OpenRC 冷插期间，greetd 首次登录可能先于 AGX 的 udev 节点。
         if [ -z "$_node" ] && [ "$(cat /etc/ordo/platform 2>/dev/null || :)" = m2-native ] &&
            [ -r /proc/device-tree/compatible ] &&
@@ -48,7 +50,7 @@ if [ -z "${WLR_RENDERER:-}" ]; then
             _tries=0
             while [ -z "$_node" ] && [ "$_tries" -lt 40 ]; do
                 sleep 0.1
-                _node=$(ordo_asahi_render_node) || :
+                _node=$(ordo_render_node) || :
                 _tries=$((_tries + 1))
             done
             if [ -z "$_node" ]; then
@@ -63,8 +65,8 @@ if [ -z "${WLR_RENDERER:-}" ]; then
         fi
         break
     done
-    unset _mesa _node
-    unset -f ordo_asahi_render_node
+    unset _dri _node
+    unset -f ordo_render_node
 fi
 # Umbriel 的特效渲染器在 pixman 路径也需要 EGL。
 export WLR_RENDERER="${WLR_RENDERER:-pixman}"

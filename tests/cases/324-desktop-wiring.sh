@@ -54,6 +54,8 @@ assert_not_contains "$_after_apply" 'chown -R ordo:ordo /home/ordo/.config' \
     "apply 之后没有 -R 的跟随式 chown"
 
 case_name "user.ordo 实例被启用"
+assert_active_line "$ROOT/install.sh" 'ln -sfn /etc/init.d/user /etc/init.d/user.ordo' "建 user.ordo 实例（不是注释）"
+assert_active_line "$ROOT/install.sh" 'rc-update add user.ordo default' "注册 user.ordo（不是注释）"
 assert_contains "$_install" 'ln -sfn /etc/init.d/user /etc/init.d/user.ordo' "建 user.ordo 实例"
 assert_contains "$_install" 'rc-update add user.ordo default' "user.ordo 进 default runlevel"
 assert_contains "$_install" '/etc/user/runlevels/default/dbus' "用户级 runlevel 软链仍在"

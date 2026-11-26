@@ -63,7 +63,9 @@ fi
         assert evaluate(WLR_RENDER_DRM_DEVICE='/other') == 'gles2|/other|', 'Render-device overrides are honored'
         driver.unlink()
         driver.symlink_to('/drivers/virtio_gpu')
-        assert evaluate() == 'pixman||1', 'A non-Apple driver must not select Asahi rendering'
+        # 驱动名是 virtio_gpu 时选中它自己的渲染节点（UTM 交付路径）；
+        # 只认 asahi 的旧实现会在这里退回 pixman。
+        assert evaluate() == f'gles2|{render}|', 'virtio_gpu must select its own render node'
         driver.unlink()
         profile.write_text('m2-native\n')
         compatible.write_bytes(b'linux,dummy-virt\0')

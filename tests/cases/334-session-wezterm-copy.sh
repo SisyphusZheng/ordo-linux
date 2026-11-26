@@ -28,7 +28,9 @@ for cmd in start-umbriel gentoo-pipewire-launcher xdg-user-dirs-update \
 done
 
 _target="$scratch/home/.config/wezterm/wezterm.lua"
-ln -s "$repo/config/desktop/skel/.config/wezterm/wezterm.lua" "$_target"
+# 软链指向 scratch 里的模板副本：测试永不能写进仓库本体
+cp "$repo/config/desktop/skel/.config/wezterm/wezterm.lua" "$scratch/template.lua"
+ln -s "$scratch/template.lua" "$_target"
 
 _run_session() {
     env -u XDG_CONFIG_HOME HOME="$scratch/home" XDG_RUNTIME_DIR="$scratch/run" \
@@ -49,9 +51,11 @@ assert_rc "$([ -w "$_target" ] && echo 0 || echo 1)" 0 "桌面用户可写"
 
 case_name "再次登录不覆盖用户改动"
 
-printf '%s\n' '-- user edit' >> "$_target"
+printf '%s\n' '-- ordo-test-user-edit' >> "$_target"
 _run_session
-assert_contains "$(cat "$_target")" "-- user edit" "用户改动保留"
+assert_contains "$(cat "$_target")" "-- ordo-test-user-edit" "用户改动保留"
+assert_not_contains "$(cat "$repo/config/desktop/skel/.config/wezterm/wezterm.lua")" \
+    "-- ordo-test-user-edit" "测试不得写进仓库模板"
 
 case_name "缺 xdg-user-dirs-update 时告警而不是静默跳过"
 

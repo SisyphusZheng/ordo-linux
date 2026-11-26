@@ -103,12 +103,8 @@ config.keys = {
 -- ============================================================
 -- OpenGL：硬件加速路径。
 -- 【注意】早期在 virtio-gpu 无加速时，OpenGL 会导致显示器挂起。
--- 现在 VM 已启用 virtio-gpu 的 GL 支持，OpenGL 可正常工作。
+-- VM 交付镜像使用 virtio-ramfb-gl；宿主不提供 virgl 时合成器会回退软件渲染，
 -- 若再次出现 "Display output is not active"，改回 'Software'。
 config.front_end = 'OpenGL'
 
 return config
--- user edit
--- user edit
--- user edit
--- user edit

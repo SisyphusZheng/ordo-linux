@@ -77,4 +77,8 @@ run_check
 assert_rc "$_rc" 0 "无残留返回 0"
 assert_eq "$_out" "" "通过时不输出噪音"
 
+case_name "install.sh 真的调用 keyring 策略"
+assert_active_line "$repo/install.sh" 'keyring-policy.sh" configure' "安装前调用 configure"
+assert_active_line "$repo/install.sh" 'keyring-policy.sh" remove' "安装后调用 remove"
+
 finish

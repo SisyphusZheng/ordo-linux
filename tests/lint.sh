@@ -229,7 +229,7 @@ fi
 printf '\n== overlay Manifest ==\n'
 _bad_manifest=""
 _n_manifest=0
-for _d in overlay/gui-apps/*/; do
+for _d in overlay/*/*/; do
     [ -d "$_d" ] || continue
     _n_manifest=$((_n_manifest + 1))
     [ -f "$_d/Manifest" ] || _bad_manifest="$_bad_manifest ${_d}Manifest"

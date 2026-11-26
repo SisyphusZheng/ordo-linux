@@ -63,7 +63,7 @@ BDEPEND="
 
 PATCHES=(
 	"${FILESDIR}"/${PN}-0.21.7-optional-vala-tests.patch
-	"${FILESDIR}"/${P}-musl-fcntl.patch
+	"${FILESDIR}"/${PN}-${PV}-musl-fcntl.patch
 
 	# Collides with gnome-base/gnome-keyring and no other distros
 	# seem to install it because of that, so just leave it uninstalled

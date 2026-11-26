@@ -35,6 +35,16 @@ assert_rc() { # actual expected label
     assert_eq "$1" "$2" "${3:-退出码}"
 }
 
+
+assert_active_line() { # file needle label —— 必须存在一行既含 needle 又未被注释
+    if grep -F -- "$2" "$1" 2>/dev/null | grep -qE -v '^[[:space:]]*#'; then
+        printf '  ok   %s\n' "${3:-$2 未被注释}"
+    else
+        printf '  FAIL %s\n' "${3:-$2 未被注释}"
+        _FAILS=$((_FAILS + 1))
+    fi
+}
+
 finish() {
     if [ "$_FAILS" -gt 0 ]; then
         printf '\n✘ %d 个断言失败\n' "$_FAILS"

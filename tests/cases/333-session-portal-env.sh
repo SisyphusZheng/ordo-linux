@@ -92,4 +92,10 @@ _log=$(cat "$scratch/log")
 assert_contains "$_log" "WAYLAND_DISPLAY=wayland-7" "autostart 时 WAYLAND_DISPLAY 已就绪"
 assert_contains "$_log" "XDG_CURRENT_DESKTOP=Umbriel" "autostart 时桌面标识已就绪"
 
+case_name "渲染节点按驱动名认（VM 的 virtio_gpu 不被当成无节点）"
+_env_src="$(cat "$repo/config/desktop/ordo-session-env")"
+assert_contains "$_env_src" '*/asahi|*/virtio_gpu' "探测接受 virtio_gpu 驱动"
+assert_contains "$_env_src" 'virtio_gpu_dri.so' "同时看 virtio_gpu 的 Mesa 驱动"
+assert_not_contains "$_env_src" 'for _mesa in /usr/lib*/dri/asahi_dri.so; do' "不再只按 asahi_dri.so 门控"
+
 finish
