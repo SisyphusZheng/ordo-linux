@@ -164,6 +164,24 @@ xwayland-satellite/yazi 的条目已随包一起失效。
 
 ### libsecret 客户端与 Secret Service 分开安装
 
-Gentoo 的 libsecret 配方在安装客户端库后选择一个 Secret Service 提供者，现有桌面镜像由此装入 GNOME Keyring。Ordo 本地配方取消这条安装后依赖，保留客户端库。Pinentry 使用终端或 Qt 界面，关闭依赖 GNOME Keyring 的 GTK 后端。默认桌面没有全局密钥服务，依赖该服务的程序无法用它跨会话恢复凭据。
+**已收回（2026-11-26）。**
 
-若 Gentoo 提供可关闭该依赖的 USE 开关，可收回本地配方。核对 Portage 闭包、greetd PAM、D-Bus 激活文件和首启桌面后再切回上游。
+原偏离保留 libsecret 客户端库，mask 掉 Secret Service 提供者，并去掉本地配方的
+安装后依赖。代价是 Noctalia 网络面板只能把 Wi-Fi 连接建成 agent-owned：密码无法
+跨会话持久化，表现为连上约 1 秒后掉线并循环重试；依赖 Secret Service 的应用也
+无法记住凭据。
+
+收回原因：网络面板必须跨会话保存密码，这是桌面可用性的硬需求；代价是多一个
+`gnome-keyring-daemon` 随会话常驻。收回方式：
+
+- `gnome-base/gnome-keyring` 进 world，`app-crypt/libsecret` 改回 Gentoo 树内版本，
+  本地 overlay 配方与 mask 一并删除；
+- `sys-auth/pambase` 启用 `gnome-keyring` USE，greetd PAM 在 `include login`
+  之后显式加入 `pam_gnome_keyring.so` 的 auth 与 session 两行；
+- 会话在 D-Bus 就绪后、Noctalia 启动前启动
+  `gnome-keyring-daemon --start --components=secrets`。
+
+正常登录（输入密码）时 PAM 用登录密码自动创建/解锁 login keyring，桌面不弹
+「新建密钥环/输入密钥环密码」对话框。greetd `[initial_session]` 首启自动登录
+没有 PAM 密码，login keyring 不会被自动创建/解锁；该会话首次使用密钥时可能
+提示一次，正常登录不受影响。

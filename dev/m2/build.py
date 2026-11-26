@@ -68,7 +68,7 @@ def bundle(include_legacy=True):
                      "config/migrations/1795601392-m2-package-defaults.sh",
                      "config/migrations/1795627149-remove-gnome-keyring.sh",
                      "config/world", "config/world.sh", "config/world.bare-metal",
-                     "config/package.mask/ordo-keyring", "config/package.use/ordo-keyring",
+                     "config/package.use/ordo-keyring",
                      "config/package.use/ordo-storage",
                      "config/forbidden-world", "config/oneshot-packages", "version",
                      "scripts/lib.sh", "scripts/ordo-i18n.sh", "scripts/ordo", "scripts/doctor",
@@ -81,7 +81,6 @@ def bundle(include_legacy=True):
         else:
             luciole = REPO / "overlay/gui-apps/luciole"
             inputs.extend([luciole / "Manifest", luciole / luciole_ebuild()])
-        inputs.extend(sorted(path for path in (REPO / "overlay/app-crypt/libsecret").rglob("*") if path.is_file()))
         for path in inputs:
             rel = path.relative_to(REPO).as_posix()
             if path.is_symlink():

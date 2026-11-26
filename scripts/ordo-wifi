@@ -1,7 +1,8 @@
 #!/bin/sh
 # ordo-wifi — 以 root 建系统级 Wi-Fi 配置（密码进 NetworkManager keyfile）
 #
-# 【为什么需要】Ordo 默认没有全局 Secret Service（偏离登记见
+# 【为什么还需要】新镜像已恢复 Secret Service（PAM 自动解锁）；本 helper 仍保留，
+# 用于旧镜像（没有密钥服务）或需要系统级、开机前可用配置的场景。旧背景：默认没有全局 Secret Service（偏离登记见
 # config/desktop/README.md「密钥服务契约」）。Noctalia 网络面板新建设连接时
 # 会落成 agent-owned（PSK 交给 keyring）：本机没有 keyring，密码从未落到
 # /etc/NetworkManager/system-connections，掉线后取不回密码 —— 表现为

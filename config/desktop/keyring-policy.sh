@@ -1,88 +1,91 @@
 #!/bin/sh
-# Deploy the Ordo client-only Secret Service library policy.
+# Ordo 密钥服务策略：Secret Service 已回归（2026-11-26 收回旧偏离）。
+#
+# check 验证「服务确实被声明与接线」，三态：0 齐备 | 1 缺件 | 2 无法判定。
+# configure 只做幂等声明收敛；remove 保留为空操作，兼容旧镜像的调用点。
 set -eu
 here=$(dirname "$(readlink -f "$0")")
 config=$(dirname "$here")
-repo=$(dirname "$config")
 
 check() {
-    # 【P1-05】set -e 下裸 portageq 缺包即静默退出 1：安装器只会报
-    # 「旧版密钥服务 / 硬件包引入了密钥服务」这类无关提示。缺包必须自己
-    # 说清缺的是哪个包；portageq 自身异常按「无法判定」返回 2。
-    if portageq has_version / app-crypt/libsecret::local; then
-        :
-    else
-        _rc=$?
-        case "$_rc" in
-            1)
-                printf '%s\n' '缺少 app-crypt/libsecret::local（Secret Service 客户端库未安装）' >&2
-                return 1 ;;
-            *)
-                printf '无法判定 app-crypt/libsecret::local 的安装状态（portageq 退出码 %s）\n' "$_rc" >&2
-                return 2 ;;
-        esac
+    _missing=0
+
+    # 1) world 必须声明 Secret Service 提供者（gnome-keyring）。
+    _world=$config/world
+    if [ ! -r "$_world" ]; then
+        printf '无法判定 %s：文件不存在或不可读\n' "$_world" >&2
+        return 2
     fi
-    if portageq has_version / app-crypt/pinentry; then
-        portageq has_version / "app-crypt/pinentry[-gtk,-keyring,ncurses]" || return 1
-    else
-        [ "$?" -eq 1 ] || return 2
+    if ! grep -Eq '^[[:space:]]*(app-crypt|gnome-base)/gnome-keyring([[:space:]]|$|::)' "$_world"; then
+        printf '缺少 gnome-keyring：world 未声明 Secret Service 提供者（%s）\n' "$_world" >&2
+        _missing=1
     fi
-    for atom in gnome-base/gnome-keyring virtual/secret-service; do
-        if portageq has_version / "$atom"; then
-            printf 'Unexpected installed package: %s\n' "$atom" >&2
-            return 1
-        else
-            [ "$?" -eq 1 ] || return 2
-        fi
-    done
-    for path in /usr/bin/gnome-keyring-daemon /usr/bin/gnome-keyring \
-        /usr/share/dbus-1/services/org.freedesktop.secrets.service \
-        /usr/share/dbus-1/services/org.freedesktop.impl.portal.Secret.service \
-        /usr/share/dbus-1/services/org.gnome.keyring.service \
-        /usr/share/dbus-1/services/org.gnome.keyring.PrivatePrompter.service \
-        /usr/share/dbus-1/services/org.gnome.keyring.SystemPrompter.service \
-        /etc/xdg/autostart/gnome-keyring-*.desktop \
-        /lib*/security/pam_gnome_keyring.so /usr/lib*/security/pam_gnome_keyring.so; do
-        if [ -e "$path" ] || [ -L "$path" ]; then
-            printf 'Unexpected keyring activation file: %s\n' "$path" >&2
-            return 1
-        fi
-    done
-    if [ -r /etc/pam.d/greetd ] && grep -Eq '^[[:space:]]*[^#[:space:]].*pam_gnome_keyring[.]so' /etc/pam.d/greetd; then
-        printf '%s\n' 'Unexpected GNOME Keyring PAM configuration' >&2
-        return 1
+
+    # 2) 任何 package.mask 都不得再遮蔽服务；目录整体缺失视为「无 mask」。
+    _maskdir=$config/package.mask
+    if [ -d "$_maskdir" ]; then
+        for _mask in "$_maskdir"/*; do
+            [ -e "$_mask" ] || continue
+            if [ ! -r "$_mask" ]; then
+                printf '无法判定 %s：文件不可读\n' "$_mask" >&2
+                return 2
+            fi
+            if sed 's/#.*//' "$_mask" |
+               grep -Eq '(^|[<>=~])[[:space:]]*((app-crypt|gnome-base)/gnome-keyring|virtual/secret-service|app-crypt/libsecret)([[:space:]]|$|[-:])'; then
+                printf 'package.mask 仍在遮蔽密钥服务：%s\n' "$_mask" >&2
+                _missing=1
+            fi
+        done
     fi
+
+    # 3) greetd PAM 必须显式接 auth 与 session 两行（include login 之后）。
+    _pam=$config/desktop/greetd/pam.d-greetd
+    if [ ! -r "$_pam" ]; then
+        printf '无法判定 %s：文件不存在或不可读\n' "$_pam" >&2
+        return 2
+    fi
+    if ! grep -Eq '^[[:space:]]*auth[[:space:]]+optional[[:space:]]+pam_gnome_keyring[.]so([[:space:]]|$)' "$_pam"; then
+        printf 'greetd PAM 缺少 auth optional pam_gnome_keyring.so（%s）\n' "$_pam" >&2
+        _missing=1
+    fi
+    if ! grep -Eq '^[[:space:]]*session[[:space:]]+optional[[:space:]]+pam_gnome_keyring[.]so[[:space:]]+auto_start([[:space:]]|$)' "$_pam"; then
+        printf 'greetd PAM 缺少 session optional pam_gnome_keyring.so auto_start（%s）\n' "$_pam" >&2
+        _missing=1
+    fi
+
+    # 4) 会话脚本必须在 D-Bus 之后启动守护进程，并在已有控制目录时去重。
+    _session=$config/desktop/umbriel/ordo-umbriel-session
+    if [ ! -r "$_session" ]; then
+        printf '无法判定 %s：文件不存在或不可读\n' "$_session" >&2
+        return 2
+    fi
+    if ! grep -Fq 'gnome-keyring-daemon --start --components=secrets' "$_session"; then
+        printf '会话脚本未启动 gnome-keyring-daemon --start --components=secrets（%s）\n' "$_session" >&2
+        _missing=1
+    elif ! grep -Fq 'GNOME_KEYRING_CONTROL' "$_session"; then
+        printf '会话脚本缺少 GNOME_KEYRING_CONTROL 去重判据（%s）\n' "$_session" >&2
+        _missing=1
+    fi
+
+    [ "$_missing" -eq 0 ] || return 1
     return 0
 }
 
 case "${1:-}" in
     check) check ;;
     configure)
-        local_repo=$(portageq get_repo_path / local)
-        case "$local_repo" in /*) ;; *) exit 1 ;; esac
-        for file in Manifest libsecret-0.21.8.2-r100.ebuild metadata.xml \
-            files/libsecret-0.21.7-optional-vala-tests.patch files/libsecret-0.21.8.2-musl-fcntl.patch; do
-            install -Dm644 "$repo/overlay/app-crypt/libsecret/$file" "$local_repo/app-crypt/libsecret/$file"
-        done
-        install -Dm644 "$config/package.mask/ordo-keyring" /etc/portage/package.mask/ordo-keyring
-        install -Dm644 "$config/package.use/ordo-keyring" /etc/portage/package.use/ordo-keyring
+        # 声明收敛：旧镜像的 ordo-keyring mask 会继续遮蔽服务，必须删掉；
+        # package.use 文件按仓库内容重写（重复执行结果一致）。
+        _dst=/etc/portage/package.use/ordo-keyring
+        mkdir -p "$(dirname "$_dst")"
+        cp "$config/package.use/ordo-keyring" "$_dst"
+        rm -f /etc/portage/package.mask/ordo-keyring
+        unset _dst
         ;;
     remove)
-        portageq has_version / app-crypt/libsecret::local
-        if [ -f /etc/pam.d/greetd ]; then
-            install -m 644 "$here/greetd/pam.d-greetd" /etc/pam.d/greetd
-        fi
-        # Remove the virtual first. Its installed dependency can protect the daemon
-        # from being removed in the same depclean invocation.
-        for atom in virtual/secret-service gnome-base/gnome-keyring; do
-            if portageq has_version / "$atom"; then
-                emerge --ask=n --deselect "$atom"
-                emerge --ask=n --depclean "$atom"
-            else
-                [ "$?" -eq 1 ] || exit 2
-            fi
-        done
-        check
+        # 旧镜像的 remove 调用点仍在 install.sh / 迁移脚本里：不再移除任何包。
+        printf '%s\n' '密钥服务策略已反转：GNOME Keyring 现在是受支持组件，remove 不再移除任何包。' >&2
+        printf '%s\n' '旧镜像无需清理；重跑安装器可更新 PAM 与会话脚本并收敛声明。' >&2
         ;;
     *)
         printf 'Usage: %s {configure|remove|check}\n' "$0" >&2

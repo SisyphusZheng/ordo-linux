@@ -42,13 +42,13 @@ ordo app list
 ordo app install org.mozilla.firefox
 ```
 
-## 连 Wi-Fi：用 ordo-wifi 建一次
+## 连 Wi-Fi：在面板点一下即可
 
-Ordo 默认没有系统钥匙环。Noctalia 的网络面板会把新连接建成「密码交给钥匙环」
-的类型；本机没有钥匙环，密码不会保存，表现为输对密码后连上约 1 秒又断开、
-反复重试。
+登录密码会自动创建并解锁系统中的 login keyring（Secret Service）。Noctalia 的
+网络面板把 Wi-Fi 密码存进 keyring，之后开机自动重连，不需要额外命令。
+**正常登录不会弹「新建密钥环」或「输入密钥环密码」对话框。**
 
-**不要在面板里直连**，用 helper 建一次系统级配置：
+旧镜像（还没有密钥服务）仍可用 helper 建系统级配置：
 
 ```sh
 doas ordo-wifi "你的 Wi-Fi 名"
@@ -56,8 +56,8 @@ doas ordo-wifi "你的 Wi-Fi 名"
 doas /opt/ordo/scripts/ordo-wifi "你的 Wi-Fi 名"
 ```
 
-它会提示输入密码，把密码存进 NetworkManager 的系统配置，之后开机会自动重连，
-不依赖钥匙环。已经用面板建过同名连接也没关系，再运行一次即可改回系统存储。
+它把密码存进 NetworkManager 的系统 keyfile，不依赖 keyring。已经用面板建过
+同名连接也没关系，再运行一次即可改回系统存储。
 
 ## 你的配置在哪里
 
@@ -76,4 +76,10 @@ doas /opt/ordo/scripts/ordo-wifi "你的 Wi-Fi 名"
 
 ## 应用保存的密码
 
-Ordo 默认不安装 GNOME Keyring。程序可使用自己的账号登录和存储功能。依赖系统 Secret Service 的程序可能需要重新输入凭据或只在当前会话记住登录。
+Ordo 安装 GNOME Keyring。正常登录时 PAM 用登录密码自动创建/解锁 login keyring，
+应用保存的密码跨会话可用。
+
+首启自动登录（greetd 的 `[initial_session]`）没有 PAM 密码，该会话首次使用密钥
+时可能提示一次；退出后正常登录即可。旧 home 里若已有用其它密码创建的 keyring，
+应用访问时也会提示一次；备份后删除 `~/.local/share/keyrings/` 下的旧 keyring，
+下次登录会按登录密码重建。

@@ -32,19 +32,29 @@ config/desktop/{umbriel,noctalia,greetd}/*.toml
 
 ## 密钥服务契约
 
-`app-crypt/libsecret::local` 只提供客户端库：`gnome-base/gnome-keyring` 与
-`virtual/secret-service` 被 mask，默认桌面**没有**全局 Secret Service
-（偏离登记见 `docs/deviations.md`「libsecret 客户端与 Secret Service 分开安装」）。
+`gnome-base/gnome-keyring` 提供 `org.freedesktop.secrets`（即 `virtual/secret-service`），
+`app-crypt/libsecret` 是客户端库，两者都随系统安装。登录时 PAM（`sys-auth/pambase`
+的 `gnome-keyring` USE + `greetd/pam.d-greetd` 的 auth/session 两行）用登录密码
+自动创建/解锁 `login` keyring；会话入口在 D-Bus 就绪后、Noctalia 之前确保
+`gnome-keyring-daemon --components=secrets` 运行。**正常登录不弹「新建密钥环 /
+输入密钥环密码」对话框。**
 
 | 消费方 | 约定 |
 |---|---|
-| NetworkManager | Wi-Fi 密码存系统 keyfile（`psk-flags=0`），不依赖 agent |
-| Noctalia 网络面板 | 会尝试用 `org.freedesktop.secrets` 存取密码；缺失时日志报 `[network] keyring lookup failed`，连接被建成 agent-owned 后掉线取不回密码（连上约 1 秒又断开）。用 `doas ordo-wifi "<SSID>"` 建系统级配置（`psk-flags=0`、`permissions` 为空），或对已有连接执行 `nmcli connection modify <连接名> wifi-sec.psk-flags 0` |
-| 依赖钥匙环的应用 | 用自己的账号体系登录与存储；不保证跨会话记住密码 |
+| Noctalia 网络面板 | 点一下即可连接并保存密码：PSK 交给 Secret Service，跨会话自动重连 |
+| NetworkManager | 面板连接使用 keyring；需要系统级 keyfile 时仍可用 `doas ordo-wifi "<SSID>"`（`psk-flags=0`） |
+| 依赖钥匙环的应用 | 使用登录时已解锁的 login keyring 保存凭据 |
 
-验收：`sh config/desktop/keyring-policy.sh check`（0 通过 / 1 有残留或缺少
-客户端库 / 2 无法判定）。残留的 D-Bus 激活文件（含
-`org.gnome.keyring.{Private,System}Prompter.service`）与 PAM 配置都会被报出来。
+**首启自动登录限制**：greetd 的 `[initial_session]` 自动登录没有 PAM 密码，
+login keyring 不会被创建/解锁；该会话首次使用密钥时可能提示一次。正常登录
+（输入密码）不受影响。
+
+**旧 home 的残留 keyring**：`~/.local/share/keyrings/` 里若已有用其它密码创建的
+keyring，PAM 无法用登录密码解锁，应用访问时会提示一次。备份后删除旧的
+`login.keyring`/`default.keyring`，下次登录会按登录密码重建。
+
+验收：`sh config/desktop/keyring-policy.sh check`（0 声明与接线齐备 / 1 缺件 /
+2 无法判定）。它检查 world、`config/package.mask`、greetd PAM 两行与会话启动行。
 
 ## 为什么是这一套
 

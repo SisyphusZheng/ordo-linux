@@ -43,7 +43,8 @@ net-wireless/iw
 # ---- 桌面外壳（Noctalia 全家桶，ADR 0011）----
 # 登录：greetd（守护进程）+ Noctalia Greeter（图形前端），零 GTK/Qt 依赖
 gui-libs/greetd
-app-crypt/libsecret::local
+app-crypt/libsecret
+gnome-base/gnome-keyring
 sys-apps/xdg-desktop-portal
 sys-apps/xdg-desktop-portal-umbriel
 # portal-gtk 保留：Flatpak 应用通过它读 Settings portal（深浅色）

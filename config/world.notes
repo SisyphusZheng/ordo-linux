@@ -150,7 +150,10 @@ dev-lang/python
 #                           由 install.sh §14a 显式 emerge。
 # ==============================================================================
 
-app-crypt/libsecret::local # 桌面客户端库，保留程序链接；独立密钥服务不再随桌面安装。
+# 面板要跨会话保存 Wi-Fi 密码：恢复 Secret Service 提供者，客户端库回到树内版本。
+# PAM 用登录密码自动创建/解锁 login keyring（见 package.use/ordo-keyring 与 greetd PAM）。
+app-crypt/libsecret
+gnome-base/gnome-keyring
 
 gnome-base/gvfs # GIO 卷监视器，供 Luciole 枚举并挂载设备。
 sys-fs/udisks # 通过系统 D-Bus 提供外接盘，挂载操作经过 polkit。

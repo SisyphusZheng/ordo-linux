@@ -5,6 +5,19 @@
 
 ## [Unreleased]
 
+### Changed
+- 恢复 Secret Service：新增 `app-crypt/gnome-keyring`，`app-crypt/libsecret` 回到
+  Gentoo 树内版本，删除本地 libsecret overlay 与 `gnome-keyring` /
+  `virtual/secret-service` 的 mask；`sys-auth/pambase` 启用 `gnome-keyring` USE。
+- greetd PAM 在 `include login` 之后加入 `pam_gnome_keyring.so` 的 auth/session
+  两行，登录时由 PAM 用登录密码自动创建/解锁 login keyring，不弹「新建/解锁
+  密钥环」对话框；会话入口在 D-Bus 就绪后、Noctalia 之前启动
+  `gnome-keyring-daemon --components=secrets`。
+- 收回偏离「libsecret 客户端与 Secret Service 分开安装」；Noctalia 网络面板可
+  跨会话保存 Wi-Fi 密码，`ordo-wifi` 降级为旧镜像兜底。
+- `config/desktop/keyring-policy.sh check` 改为验证声明与接线（world、mask、
+  PAM、会话启动），`configure` 只做幂等声明收敛，`remove` 改为 no-op 提示。
+
 ## [0.1.0] — 产品候选版
 
 首个产品版本面向两个安装目标：Mac14,2 的外接 USB 系统盘，以及 Apple Silicon 上的 ARM64 UTM 虚拟机。下方按原日期保留产品定版前的开发记录和当时的版本号。

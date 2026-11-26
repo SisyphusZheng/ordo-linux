@@ -125,6 +125,7 @@ ordo_session_activate_environment() {
     command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
     _ordo_ae="XDG_RUNTIME_DIR XDG_SESSION_TYPE QT_IM_MODULE GTK_IM_MODULE XMODIFIERS"
     [ -n "${XDG_CURRENT_DESKTOP:-}" ] && _ordo_ae="$_ordo_ae XDG_CURRENT_DESKTOP"
+    [ -n "${GNOME_KEYRING_CONTROL:-}" ] && _ordo_ae="$_ordo_ae GNOME_KEYRING_CONTROL"
     [ -n "${WAYLAND_DISPLAY:-}" ] && _ordo_ae="$_ordo_ae WAYLAND_DISPLAY"
     [ -n "${DISPLAY:-}" ] && _ordo_ae="$_ordo_ae DISPLAY"
     # shellcheck disable=SC2086  # 变量名列表按空格拆分正是本意

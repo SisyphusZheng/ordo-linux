@@ -12,6 +12,29 @@ export XDG_CURRENT_DESKTOP=Umbriel
 
 . /usr/local/bin/ordo-session-env
 
+# 密钥服务：PAM 已用登录密码解锁 login keyring；这里确保 secrets 组件在
+# D-Bus 会话总线就绪后、Noctalia（合成器 autostart）之前运行，并把控制目录
+# 导出给会话子进程。PAM 已经给出 GNOME_KEYRING_CONTROL 时不重复启动。
+if [ -z "${GNOME_KEYRING_CONTROL:-}" ]; then
+    if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+        if _ordo_keyring_env=$(gnome-keyring-daemon --start --components=secrets 2>/dev/null); then
+            [ -n "$_ordo_keyring_env" ] && eval "$_ordo_keyring_env"
+            if [ -n "${GNOME_KEYRING_CONTROL:-}" ]; then
+                export GNOME_KEYRING_CONTROL
+            else
+                printf '%s\n' 'Ordo: gnome-keyring-daemon 未返回 GNOME_KEYRING_CONTROL（密钥服务不可用）' >&2
+            fi
+        else
+            printf '%s\n' 'Ordo: gnome-keyring-daemon 启动失败（密钥服务不可用；桌面继续启动）' >&2
+        fi
+        unset _ordo_keyring_env
+    else
+        printf '%s\n' 'Ordo: 缺少 gnome-keyring-daemon（gnome-base/gnome-keyring 未部署）' >&2
+    fi
+    # 把 GNOME_KEYRING_CONTROL 等已就绪变量补写进 D-Bus activation environment。
+    ordo_session_activate_environment
+fi
+
 # wezterm 配置按手册要能原地编辑，Noctalia 的 wezterm 模板也会写色名。
 # 旧版 apply / 旧镜像把它软链到 root 只读的 /opt/ordo，实机报
 # "touch wezterm.lua: 权限不够"。会话入口在用户侧把它落成真实副本；

@@ -1,4 +1,4 @@
-sys-auth/pambase -gnome-keyring
-# The PAM stack must not select the GNOME Keyring service.
+sys-auth/pambase gnome-keyring
+# 正 USE：让 system-auth 默认栈接入 pam_gnome_keyring，登录密码自动创建/解锁 login keyring。
 app-crypt/pinentry -gtk -keyring ncurses
-# Keep GnuPG passphrase entry via Qt or the terminal without the GNOME backend.
+# 口令输入保持终端/curses 后端，不为密钥环保留 GTK 依赖。
