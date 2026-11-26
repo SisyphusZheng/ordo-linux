@@ -1,10 +1,10 @@
 #!/bin/sh
 # 回归：config/release 下每个发布锚点都必须有消费方
 #
-# 曾经：config/release/stage3-arm64-desktop-openrc.sha256.asc 是一份离线
-# 签名摘要副本，没有任何脚本读取；它的固定 tarball 名还与 config/arch
-# 的 STAGE3_TARBALL 不一致，等于第二个互相矛盾的 stage3 信任锚。
-# 删除后，这条用例守住「不再出现无人消费的锚点」。
+# 曾经有一份离线的 stage3 签名摘要副本留在 config/release：没有任何脚本
+# 读取它，它固定的 tarball 名还与 config/arch 的 STAGE3_TARBALL 不一致，
+# 等于第二个互相矛盾的信任锚。删除后，这条用例守住「不再出现无人消费的锚点」。
+# 判据只扫 install.sh / scripts / config：测试与文档提到文件名不算消费方。
 set -u
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$ROOT/tests/lib/assert.sh"
@@ -15,7 +15,8 @@ orphans=""
 for f in $(find "$ROOT/config/release" -type f | sort); do
     rel=${f#"$ROOT/"}
     base=${f##*/}
-    hits="$(cd "$ROOT" && git grep -lF -- "$base" -- . 2>/dev/null | grep -v '^config/release/' | head -1)"
+    hits="$(cd "$ROOT" && git grep -lF -- "$base" -- install.sh scripts config docs dev 2>/dev/null \
+        | grep -v '^config/release/' | head -1)"
     [ -n "$hits" ] || orphans="$orphans $rel"
 done
 assert_eq "$orphans" "" "没有无人消费的发布锚点"

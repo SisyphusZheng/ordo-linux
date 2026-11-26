@@ -439,7 +439,14 @@ fi
 #      其它机器不产生这项（报告本来就不该存在）。
 if [ -r /proc/device-tree/compatible ] &&
    tr '\000' '\n' < /proc/device-tree/compatible | grep -Fxq apple,j413; then
-    _hw_log="${XDG_STATE_HOME:-${HOME:-}/.local/state}/ordo/m2-hardware.log"
+    # 【P1-06】root（doas doctor）不能读自己 HOME 下的报告：那是 /root，
+    # 契约明确禁止；root 时只认 /home/*/ 里的桌面用户报告。
+    if [ "$(id -u 2>/dev/null || : )" = 0 ]; then
+        _hw_log=$(ls -t /home/*/.local/state/ordo/m2-hardware.log 2>/dev/null | head -1 || : )
+        [ -n "${_hw_log:-}" ] || _hw_log=/nonexistent-root-report
+    else
+        _hw_log="${XDG_STATE_HOME:-${HOME:-}/.local/state}/ordo/m2-hardware.log"
+    fi
     if [ ! -f "$_hw_log" ]; then
         skip "没有 M2 硬件自检报告（${_hw_log}；登录桌面后运行 ordo-m2-hardware --session-report，不是通过）"
     elif [ ! -r "$_hw_log" ]; then
@@ -447,7 +454,7 @@ if [ -r /proc/device-tree/compatible ] &&
     else
         # 只认**末行**：报告可能包含多段诊断，exit= 是 verify-hardware.sh
         # 收尾写的结论；取文件里任意一行会被历史残留误导。
-        _hw_last="$(tail -n 1 "$_hw_log" 2>/dev/null || : )"
+        _hw_last="$(grep -v '^[[:space:]]*$' "$_hw_log" 2>/dev/null | tail -n 1 || : )"
         case "$_hw_last" in
             exit=0) ok "M2 硬件自检通过（最近一次会话）" ;;
             exit=1) bad "M2 硬件自检报异常（${_hw_log}；重跑 ordo-m2-hardware --session-report 看「异常」项）" ;;

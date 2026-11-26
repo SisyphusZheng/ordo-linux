@@ -39,14 +39,15 @@ class TestUtm(unittest.TestCase):
             local_repo = Path(tmp) / "local"
             luciole = local_repo / "gui-apps/luciole"
             luciole.mkdir(parents=True)
-            (luciole / "luciole-0.1.0.ebuild").write_text('LUCIOLE_COMMIT="main"\n')
+            _ebuild = next((ROOT / "overlay/gui-apps/luciole").glob("*.ebuild")).name
+            (luciole / _ebuild).write_text('LUCIOLE_COMMIT="main"\n')
             prelude = 'set -eu\nportageq() { [ "$*" = "get_repo_path / local" ] && printf "%s\\n" "$local"; }\n'
             subprocess.run(
                 ["/bin/sh", "-c", prelude + script[start:end]],
                 env={**os.environ, "repo": str(ROOT), "local": str(local_repo)},
                 check=True,
             )
-            for name in ("Manifest", "luciole-0.1.0.ebuild"):
+            for name in ("Manifest", _ebuild):
                 self.assertEqual(
                     (ROOT / "overlay/gui-apps/luciole" / name).read_bytes(),
                     (luciole / name).read_bytes(),

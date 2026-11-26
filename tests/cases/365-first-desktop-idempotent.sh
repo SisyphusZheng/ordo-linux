@@ -24,7 +24,7 @@ mkdir -p "$scratch/bin" \
     "$scratch/etc/greetd" "$scratch/etc/init.d" "$scratch/etc/runlevels/default" \
     "$scratch/etc/ordo" "$scratch/etc/local.d" \
     "$scratch/home/ordo/.config/umbriel" "$scratch/home/ordo/.config/noctalia" \
-    "$scratch/home/.ordo" "$scratch/var/lib/ordo" "$scratch/usr/share/backgrounds"
+    "$scratch/var/lib/ordo" "$scratch/usr/share/backgrounds"
 
 # first-desktop.sh 读取的声明与工具（内容不参与本用例）。
 cp "$repo/config/desktop/greetd/config.toml" "$scratch/opt/ordo/config/desktop/greetd/"

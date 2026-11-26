@@ -12,7 +12,8 @@ HOME_DATASET="${HOME_DATASET:-$POOL/home}"   # 用户数据，回滚系统时不
 #          所以 ordo snap 不应提示把它 promote/rename 成 DATASET。
 BUILD_DATASETS="${BUILD_DATASETS:-$POOL/ordo-build-* $POOL/ordo-m2-build}"
 TEST_BE="${TEST_BE:-$POOL/root/ordo-m2-hardware}"
-# 清理（手工；先确认 bootfs 已离开 TEST_BE，再销毁）：
-#   zfs list -H -o name | grep -E "^$POOL/(ordo-build-|ordo-m2-build$)" |
+# 清理（手工；先确认 bootfs 已离开测试 BE，再销毁）。下面按 rpool 写死，
+# 照抄即可执行——本文件是声明片段，注释里的 $POOL/$TEST_BE 不会被展开。
+#   zfs list -H -o name | grep -E "^rpool/(ordo-build-|ordo-m2-build$)" |
 #       xargs -r -n1 zfs destroy -r
-#   zfs destroy -r "$TEST_BE"     # 仅在 bootfs 指向规范 BE 之后
+#   zfs destroy -r rpool/root/ordo-m2-hardware   # 仅在 bootfs 指向 rpool/root/ordo 之后

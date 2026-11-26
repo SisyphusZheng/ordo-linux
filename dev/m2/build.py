@@ -74,7 +74,7 @@ def bundle(include_legacy=True):
                      "scripts/lib.sh", "scripts/ordo-i18n.sh", "scripts/ordo", "scripts/doctor",
                      "scripts/ordo-config", "scripts/ordo-snap", "scripts/ordo-snap-auto",
                      "scripts/ordo-backup", "scripts/ordo-migrate", "scripts/ordo-selfcheck",
-                     "scripts/ordo-build-manifest", "scripts/sysup"):
+                     "scripts/ordo-build-manifest", "scripts/ordo-wifi", "scripts/sysup"):
             inputs.append(REPO / name)
         if include_legacy:
             inputs.append(REPO / "dev/m2/display/modules.tar.gz")

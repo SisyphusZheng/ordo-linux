@@ -23,8 +23,8 @@ assert_contains "$dataset" 'ordo-build-*' "覆盖 ordo-build-* 构建缓存"
 assert_contains "$dataset" 'ordo-m2-build' "覆盖 ordo-m2-build"
 assert_contains "$dataset" 'TEST_BE="${TEST_BE:-$POOL/root/ordo-m2-hardware}"' \
     "显式登记验收镜像的测试 BE"
-assert_contains "$dataset" 'zfs destroy -r "$TEST_BE"' "给出测试 BE 的清理命令"
-assert_contains "$dataset" 'grep -E "^$POOL/(ordo-build-|ordo-m2-build$)"' \
+assert_contains "$dataset" 'zfs destroy -r rpool/root/ordo-m2-hardware' "给出测试 BE 的清理命令"
+assert_contains "$dataset" 'grep -E "^rpool/(ordo-build-|ordo-m2-build$)"' \
     "清理命令与声明同名"
 assert_contains "$dataset" 'xargs -r -n1 zfs destroy -r' "构建残留的清理路径可执行"
 

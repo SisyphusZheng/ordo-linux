@@ -137,4 +137,10 @@ _out=$(ORDO_WIFI_PSK=x NM_LOG="$scratch/log" NM_KEY_DIR="$scratch/keys" \
 assert_rc "$_rc" 2 "缺 nmcli 退出 2"
 assert_contains "$_out" "无法判定" "明确标注无法判定"
 
+
+case_name "ordo-wifi 必须真的装进 PATH（否则文档第一条命令就是 command not found）"
+assert_contains "$(cat "$repo/install.sh")" "ordo-selfcheck ordo-wifi" "install.sh 软链白名单含 ordo-wifi"
+assert_contains "$(cat "$repo/config/platform/m2/install-cli.sh")" "ordo-wifi" "M2 CLI 刷新清单含 ordo-wifi"
+assert_contains "$(cat "$repo/dev/m2/build.py")" "scripts/ordo-wifi" "M2 bundle 含 ordo-wifi"
+
 finish

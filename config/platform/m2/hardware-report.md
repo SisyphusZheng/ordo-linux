@@ -28,7 +28,8 @@ exit=<0|1|2>
 
 ## 读取规则（doctor 三态）
 
-1. 平台不是 `m2` / `m2-native`：不做这项检查（也不计 skip）。
+1. 不是 J413 设备（`/proc/device-tree/compatible` 里没有 `apple,j413`）：
+   不做这项检查（也不计 skip）。判定只看设备树，不看 `/etc/ordo/platform`。
 2. 找不到报告、不可读、为空、最后一个非空行不匹配 `^exit=[012]$`：
    `skip`（最终 exit 2），提示「尚无 M2 硬件验收报告」，不得打勾。
 3. `exit=0` → `ok`；`exit=1` → `bad`；`exit=2` → `skip`（最终 exit 2）。

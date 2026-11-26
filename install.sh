@@ -692,7 +692,7 @@ if [ -d "$REPO_DIR/scripts" ]; then
 
     # 入口白名单：只软链**用户会敲的命令**，内部脚本（lib.sh / ordo-i18n.sh）
     # 不暴露到 PATH，避免污染命令空间。
-    for _entry in ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck; do
+    for _entry in ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck ordo-wifi; do
         [ -f "/opt/ordo/scripts/$_entry" ] || continue
         ln -sf "/opt/ordo/scripts/$_entry" "/usr/local/bin/$_entry"
     done

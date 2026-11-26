@@ -80,6 +80,10 @@ def platform_contract():
         # 3) 已是 m2 时保持 m2
         root = run_install_hardware(tmp / "c", "m2")
         assert (root / "etc/ordo/platform").read_text().strip() == "m2"
+        # 3b) 非 m2 的既有值必须原样保留：632144b 的旧实现会把任何
+        #     "不是 m2-native" 的值改写成 m2，这条用例在旧实现上变红（B3）。
+        root = run_install_hardware(tmp / "c2", "vm")
+        assert (root / "etc/ordo/platform").read_text().strip() == "vm", "既有 vm 标记被改写"
         # 4) 已存在的 marker 一律不改写：带注释/多行的 m2-native 仍是 native。
         #    旧实现把整份文件与 "m2-native" 做字符串比较，注释行会让它判成
         #    “非 native”并静默降级成 m2；还原旧实现这条用例变红（B3）。

@@ -147,6 +147,6 @@ mounts+=("$root/run")
 install -m 755 "$here/configure-root.sh" "$root/tmp/ordo-vm-configure"
 chroot "$root" /tmp/ordo-vm-configure "$release"
 rm "$root/tmp/ordo-vm-configure"
-[[ ! -s "$root/etc/machine-id" && ! -e "$root/var/lib/ordo/greetd-first-session" ]]
+[[ ! -s "$root/etc/machine-id" && ! -e "$root/var/lib/ordo/greetd-first-session" && ! -e "$root/home/.ordo/greetd-first-session" ]]
 [[ -z $(find "$root/etc/ssh" -maxdepth 1 -name 'ssh_host_*' -print -quit 2>/dev/null || :) ]]
 zpool sync "$pool"

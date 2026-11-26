@@ -94,4 +94,22 @@ assert_active_line "$ROOT/dev/vm/configure-root.sh" \
 assert_rc "$([ -x "$ROOT/scripts/ordo-build-manifest" ] && echo 0 || echo 1)" 0 \
     "生成器可执行"
 
+
+case_name "摘要工具缺失时必须 exit 2（不得输出通过）"
+_mini="$tmp/minbin"
+mkdir -p "$_mini"
+for _t in sh dirname cat mkdir mv chmod ls head rm; do
+    _p="$(command -v "$_t" 2>/dev/null || : )"
+    [ -n "$_p" ] && ln -sf "$_p" "$_mini/$_t"
+done
+_fixture="$tmp/nodigest"
+rm -rf "$_fixture"
+mkdir -p "$_fixture/opt/ordo" "$_fixture/etc/ordo"
+printf '0.1.0\n' > "$_fixture/opt/ordo/version"
+PATH="$_mini" sh "$ROOT/scripts/ordo-build-manifest" "$_fixture" vm arm64 \
+    "$_fixture/etc/ordo/build-manifest" >"$tmp/nodigest.out" 2>&1
+_rc=$?
+assert_rc "$_rc" 2 "缺摘要工具返回 2"
+assert_rc "$([ -f "$_fixture/etc/ordo/build-manifest" ] && echo 0 || echo 1)" 1 "不得写出半份清单"
+
 finish

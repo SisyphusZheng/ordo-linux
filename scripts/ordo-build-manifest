@@ -87,9 +87,13 @@ _target() {
 _sum() {
     if _digest=$(ordo_sha256 "$(_host "$1")"); then
         printf '%s\n' "$_digest"
-    else
-        unknown "无法计算 sha256：$(_host "$1")"
+        return 0
     fi
+    # 【P1-02】不能在这里 exit 2：函数在 $(...) 里调用，退出码会被命令替换
+    # 吞掉，上层会继续写出空摘要并以 0 退出（AGENTS：无法判定不得输出通过）。
+    # 由调用方用 `|| exit 2` 接住。
+    printf '!! 无法计算 sha256：%s（退出码 2=无法判定）\n' "$(_host "$1")" >&2
+    return 2
 }
 
 _version_file="$(_host /opt/ordo/version)"
@@ -111,7 +115,8 @@ _entries=0
                 "config/world.bare-metal.$_arch" config/arch config/dataset \
                 config/forbidden-world config/oneshot-packages; do
         [ -f "$_decl_root/$_rel" ] || continue
-        printf 'decl %s /opt/ordo/%s\n' "$(_sum "/opt/ordo/$_rel")" "$_rel"
+        _sha=$(_sum "/opt/ordo/$_rel") || exit 2
+        printf 'decl %s /opt/ordo/%s\n' "$_sha" "$_rel"
         _entries=$((_entries + 1))
     done
     for _src in "$_decl_root"/config/platform/*/world.base \
@@ -122,19 +127,28 @@ _entries=0
                 "$_decl_root"/config/package.mask/*; do
         [ -f "$_src" ] || continue
         _rel=$(_target "$_src")
-        printf 'decl %s %s\n' "$(_sum "$_rel")" "$_rel"
+        _sha=$(_sum "$_rel") || exit 2
+        printf 'decl %s %s\n' "$_sha" "$_rel"
         _entries=$((_entries + 1))
     done
     # 部署产物：构建时从声明拷出去的文件，磁盘上的字节必须与声明一致。
     # 目标缺失也照写：verify 要能报出「部署产物缺失」，而不是静默跳过。
-    for _pair in \
-        /opt/ordo/config/desktop/umbriel/ordo-umbriel-session:/usr/local/bin/ordo-umbriel-session \
-        /opt/ordo/config/desktop/ordo-session-env:/usr/local/bin/ordo-session-env \
-        /opt/ordo/config/desktop/ffplay:/usr/local/bin/ffplay; do
+    # 【平台相关】ffplay 只由 install.sh 与 VM 装配部署；M2 首启由
+    # first-desktop.sh 只装会话脚本，登记 ffplay 会让 M2 上 verify 恒报
+    # "部署产物缺失"（真实存在的不一致，不是缺文件）。
+    _pairs="/opt/ordo/config/desktop/umbriel/ordo-umbriel-session:/usr/local/bin/ordo-umbriel-session
+/opt/ordo/config/desktop/ordo-session-env:/usr/local/bin/ordo-session-env"
+    case "$_platform" in
+        m2|m2-native) ;;
+        *) _pairs="$_pairs
+/opt/ordo/config/desktop/ffplay:/usr/local/bin/ffplay" ;;
+    esac
+    for _pair in $_pairs; do
         _msrc=${_pair%%:*}
         _mdst=${_pair##*:}
         [ -f "$(_host "$_msrc")" ] || continue
-        printf 'copy %s %s %s\n' "$(_sum "$_msrc")" "$_msrc" "$_mdst"
+        _sha=$(_sum "$_msrc") || exit 2
+        printf 'copy %s %s %s\n' "$_sha" "$_msrc" "$_mdst"
         _entries=$((_entries + 1))
     done
 } > "$_tmp" || die "构建清单写入失败：$_out"

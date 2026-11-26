@@ -53,7 +53,9 @@ rm -f /etc/machine-id /var/lib/dbus/machine-id /etc/hostid /etc/zfs/zpool.cache
 install -m 444 /dev/null /etc/machine-id
 ln -s /etc/machine-id /var/lib/dbus/machine-id
 zgenhostid
-rm -f /etc/ssh/ssh_host_* /etc/NetworkManager/system-connections/* /var/lib/ordo/greetd-first-session
+install -d -m 0755 /home/.ordo
+rm -f /etc/ssh/ssh_host_* /etc/NetworkManager/system-connections/* \
+      /var/lib/ordo/greetd-first-session /home/.ordo/greetd-first-session
 rm -f /var/lib/NetworkManager/secret_key /var/lib/NetworkManager/seen-bssids \
     /var/lib/NetworkManager/timestamps
 for level in /etc/runlevels/*; do
