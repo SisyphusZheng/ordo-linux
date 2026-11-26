@@ -1,0 +1,259 @@
+#!/bin/sh
+# ordo-selfupdate — 把发行版自带的 ordo 工具链更新到 /opt/ordo（A2 / D1-4）
+#
+# 【要解决的问题】旧镜像的 /opt/ordo 是一份冻结副本：迁移脚本、doctor、
+# 备份逻辑的修复都只对「下一次重装」生效，而唯一的重装路径先 wipefs 整盘。
+# 用户因此被锁死在装机那一天。本脚本是「把修好的 ordo 送进机器」的通路。
+#
+# 用法：
+#   ordo-selfupdate [--from <tarball|url>] [--sha256 <hex>] [--root <dir>]
+#                   [--dry-run] [--check]
+#
+#   --from     发布 tarball 路径或 https URL（默认读 /etc/ordo/selfupdate.conf）
+#   --sha256   tarball 的 sha256；省略时读 <tarball>.sha256 或同目录 sidecar
+#   --root     安装根（默认 /opt/ordo；用例用它在临时目录里跑完整流程）
+#   --dry-run  只打印将要做的事
+#   --check    只打印当前版本与更新源，不修改
+#
+# 退出码：0 已更新或已是最新 | 1 校验/安装失败 | 2 无法判定（无更新源、无摘要工具）
+#
+# 【原子性】安装根是**指向版本目录的软链**（/opt/ordo → /opt/ordo.d/<版本>）。
+# 切换 = 建临时软链 + rename(2) 覆盖旧软链，中间不存在「半套文件」的窗口。
+# 旧机器上 /opt/ordo 还是真实目录：第一次更新会把它整体移到
+# /opt/ordo.d/legacy-<版本>，再建软链（这一次是两次 rename，有极短窗口；
+# 之后每次更新都是原子的）。旧版本目录保留，不自动删除。
+#
+# 【为什么不做签名】发布签名校验在 dev/release 的产物侧完成；这里只做
+# 摘要校验（sha256）与结构校验，避免在没有信任锚的机器上假装「验签通过」。
+
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+PROG="ordo-selfupdate"
+CONF_FILE="${ORDO_SELFUPDATE_CONF:-/etc/ordo/selfupdate.conf}"
+
+usage() {
+    cat <<EOF
+$PROG — 更新 /opt/ordo 到发布 tarball
+
+用法: $PROG [选项]
+
+  --from <路径|https URL>  发布 tarball（默认读 $CONF_FILE 的 url=）
+  --sha256 <hex>           tarball 的 sha256（默认读 sidecar / 配置的 sha256=）
+  --root <目录>            安装根（默认 /opt/ordo）
+  --dry-run                只显示将做什么
+  --check                  只显示当前版本与更新源
+  -h, --help               显示本帮助
+
+退出码: 0 已更新/已最新 | 1 失败 | 2 无法判定
+EOF
+}
+
+die() { printf '\033[1;31m!!\033[0m %s\n' "$*" >&2; exit 1; }
+unknown() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; printf '   （退出码 2=无法判定）\n' >&2; exit 2; }
+
+FROM=""
+WANT_SHA=""
+DEST_ROOT="${ORDO_SELFUPDATE_ROOT:-/opt/ordo}"
+DRY_RUN=0
+CHECK_ONLY=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --from)   [ "$#" -ge 2 ] || die "--from 需要参数"; FROM=$2; shift 2 ;;
+        --sha256) [ "$#" -ge 2 ] || die "--sha256 需要参数"; WANT_SHA=$2; shift 2 ;;
+        --root)   [ "$#" -ge 2 ] || die "--root 需要参数"; DEST_ROOT=$2; shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
+        --check)   CHECK_ONLY=1; shift ;;
+        -h|--help) usage; exit "$ORDO_EXIT_OK" ;;
+        *) die "未知参数：$1（试 $PROG --help）" ;;
+    esac
+done
+
+CURRENT_VERSION="$(cat "$DEST_ROOT/version" 2>/dev/null || true)"
+if [ -z "$CURRENT_VERSION" ]; then
+    # 目录不存在时不是「已是最新」；但也不该把「未安装」当成错误。
+    if [ ! -e "$DEST_ROOT" ]; then
+        unknown "$DEST_ROOT 不存在：ordo 未按发行布局安装，无法判定当前版本"
+    fi
+    unknown "读不到 $DEST_ROOT/version：安装不完整，无法判定当前版本"
+fi
+
+# 更新源：命令行 > 环境变量 > /etc/ordo/selfupdate.conf
+if [ -z "$FROM" ] && [ -r "$CONF_FILE" ]; then
+    # 只认 key=value；不 source（配置文件不该能执行任意代码）。
+    while IFS='=' read -r _k _v; do
+        _k=$(printf '%s' "${_k:-}" | tr -d '[:space:]')
+        case "$_k" in
+            url)    [ -n "$FROM" ] || FROM=$(printf '%s' "${_v:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//') ;;
+            sha256) [ -n "$WANT_SHA" ] || WANT_SHA=$(printf '%s' "${_v:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//') ;;
+        esac
+    done < "$CONF_FILE"
+fi
+[ -n "$FROM" ] || FROM="${ORDO_SELFUPDATE_SOURCE:-}"
+[ -n "$WANT_SHA" ] || WANT_SHA="${ORDO_SELFUPDATE_SHA256:-}"
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+    printf '当前版本：%s\n' "$CURRENT_VERSION"
+    printf '安装根：  %s%s\n' "$DEST_ROOT" \
+        "$(if [ -L "$DEST_ROOT" ]; then printf '（软链 → %s）' "$(readlink "$DEST_ROOT")"; else printf '（真实目录，首次更新会转为软链）'; fi)"
+    printf '更新源：  %s\n' "${FROM:-（未配置）}"
+    [ -n "$WANT_SHA" ] && printf '摘要：    %s\n' "$WANT_SHA"
+    exit "$ORDO_EXIT_OK"
+fi
+
+if [ -z "$FROM" ]; then
+    unknown "没有配置更新源（--from、$CONF_FILE 或 ORDO_SELFUPDATE_SOURCE）"
+fi
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/ordo-selfupdate.XXXXXX")" || die "无法创建临时目录"
+STAGE=""
+trap 'rm -rf "$WORK" ${STAGE:+"$STAGE"}' EXIT HUP INT TERM
+
+# ---- 1) 取 tarball（本地路径直接用；URL 用 curl 下载到临时目录）----
+case "$FROM" in
+    http://*|https://*)
+        command -v curl >/dev/null 2>&1 || unknown "URL 更新源需要 curl（未安装）"
+        _tar="$WORK/ordo-release.tar.gz"
+        printf '下载 %s\n' "$FROM"
+        curl -fsSL "$FROM" -o "$_tar" || die "下载失败：$FROM"
+        ;;
+    *://*) die "不支持的更新源协议：${FROM}（只认 https/http 与本地路径）" ;;
+    *)
+        _tar=$FROM
+        [ -f "$_tar" ] || die "tarball 不存在：$_tar"
+        ;;
+esac
+
+# ---- 2) 摘要校验（没有摘要 = 无法判定，不安装）----
+if [ -z "$WANT_SHA" ]; then
+    case "$FROM" in
+        http://*|https://*)
+            if command -v curl >/dev/null 2>&1; then
+                _side="$WORK/release.tar.gz.sha256"
+                if curl -fsSL "$FROM.sha256" -o "$_side" 2>/dev/null; then
+                    WANT_SHA="$(awk 'NF {print $1; exit}' "$_side")"
+                fi
+            fi
+            ;;
+        *)
+            if [ -f "$_tar.sha256" ]; then
+                WANT_SHA="$(awk 'NF {print $1; exit}' "$_tar.sha256")"
+            fi
+            ;;
+    esac
+fi
+if [ -z "$WANT_SHA" ]; then
+    unknown "没有 tarball 摘要（--sha256 或 sidecar）：无法确认来源完整性，不安装"
+fi
+case "$WANT_SHA" in
+    *[!0-9a-fA-F]*) die "摘要格式非法（应为 sha256 十六进制）：$WANT_SHA" ;;
+esac
+[ "${#WANT_SHA}" -eq 64 ] || die "摘要长度不是 64：$WANT_SHA"
+
+ACTUAL_SHA="$(ordo_sha256 "$_tar")" || unknown "没有可用的 sha256 工具（sha256sum/shasum/openssl），无法校验"
+if [ "$ACTUAL_SHA" != "$WANT_SHA" ]; then
+    die "摘要不匹配，拒绝安装（期望 ${WANT_SHA}，实际 ${ACTUAL_SHA}）"
+fi
+printf '\033[32m==>\033[0m 摘要校验通过：%s\n' "$ACTUAL_SHA"
+
+# ---- 3) 结构与安全性预检（解包前）----
+tar -tzf "$_tar" > "$WORK/list" 2>/dev/null || die "不是可读的 gzip tar：$_tar"
+if grep -Eq '(^/|(^|/)\.\.(/|$))' "$WORK/list"; then
+    die "tarball 含绝对路径或 .. 路径，拒绝解包"
+fi
+
+# ---- 4) 解包到 store 下的暂存目录 ----
+DEST_ROOT="${DEST_ROOT%/}"
+STORE="${ORDO_SELFUPDATE_STORE:-$(dirname "$DEST_ROOT")/ordo.d}"
+mkdir -p "$STORE" || die "无法创建 $STORE"
+STAGE="$(mktemp -d "$STORE/.staging.XXXXXX")" || die "无法创建暂存目录（${STORE}）"
+tar -xzf "$_tar" -C "$STAGE" || die "解包失败"
+
+# 允许 tarball 顶层带一个目录（ordo-<版本>/），也允许直接是 scripts/。
+PAYLOAD=""
+for _cand in "$STAGE" "$STAGE"/*; do
+    [ -d "$_cand" ] || continue
+    if [ -f "$_cand/scripts/lib.sh" ] && [ -f "$_cand/version" ]; then
+        PAYLOAD="$_cand"
+        break
+    fi
+done
+[ -n "$PAYLOAD" ] || die "tarball 结构不符：找不到同时含 scripts/lib.sh 与 version 的目录"
+[ -f "$PAYLOAD/scripts/ordo" ] || die "tarball 缺 scripts/ordo"
+[ -f "$PAYLOAD/scripts/ordo-migrate" ] || die "tarball 缺 scripts/ordo-migrate（迁移机制是升级的一部分）"
+NEW_VERSION="$(cat "$PAYLOAD/version")"
+case "$NEW_VERSION" in
+    ''|*[!A-Za-z0-9._+-]*) die "tarball 的 version 非法：${NEW_VERSION:-空}" ;;
+esac
+
+# 已是最新：不做无意义的切换（但仍要保证安装根是软链，否则下一次也不原子）。
+if [ "$NEW_VERSION" = "$CURRENT_VERSION" ] && [ -L "$DEST_ROOT" ]; then
+    printf '\033[32m==>\033[0m 已是最新版本 %s\n' "$NEW_VERSION"
+    exit "$ORDO_EXIT_OK"
+fi
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    printf 'dry-run：将安装 %s → %s/%s，并把 %s 切到该目录\n' \
+        "$NEW_VERSION" "$STORE" "$NEW_VERSION" "$DEST_ROOT"
+    exit "$ORDO_EXIT_OK"
+fi
+
+# ---- 5) 落入版本目录（同版本重复发布时替换，不叠加）----
+TARGET_DIR="$STORE/$NEW_VERSION"
+if [ -e "$TARGET_DIR" ]; then
+    rm -rf "$TARGET_DIR" || die "无法清理旧目录 $TARGET_DIR"
+fi
+mv "$PAYLOAD" "$TARGET_DIR" || die "无法把新版本移到 $TARGET_DIR"
+chmod 755 "$TARGET_DIR/scripts/"* 2>/dev/null || true
+chmod -R a+rX "$TARGET_DIR/config" 2>/dev/null || true
+
+# 把新软链原子地放到安装根的位置。
+#
+# 【为什么不能直接 mv】安装根本身是指向目录的软链时，POSIX mv 会把它当成
+# 「目录」并把源移进目录里（实测把临时软链塞进了旧版本目录，安装根没变）。
+# GNU 用 -T、BSD 用 -h 才把目标当普通文件处理；两者都没有时退回
+# unlink+symlink（非原子，但窗口只有两条系统调用）。
+_swap_link() { # 新软链 目标
+    if mv -T "$1" "$2" 2>/dev/null; then return 0; fi
+    if mv -h "$1" "$2" 2>/dev/null; then return 0; fi
+    _sl_dest=$(readlink "$1") || return 1
+    ln -sfn "$_sl_dest" "$2"
+}
+
+# 结构验收：装进去的东西必须真的能跑（只跑 --help，不碰 ZFS/root）。
+if ! sh "$TARGET_DIR/scripts/ordo" --help >/dev/null 2>&1; then
+    rm -rf "$TARGET_DIR"
+    die "新版本自检失败（scripts/ordo --help），已回滚目录改动"
+fi
+
+# ---- 6) 切换安装根 ----
+if [ -d "$DEST_ROOT" ] && [ ! -L "$DEST_ROOT" ]; then
+    # 旧布局：真实目录。整体移到 store 保底，再建软链（一次性，非原子）。
+    LEGACY_DIR="$STORE/legacy-$CURRENT_VERSION"
+    [ -e "$LEGACY_DIR" ] && LEGACY_DIR="$LEGACY_DIR-$(date +%Y%m%d-%H%M%S)"
+    mv "$DEST_ROOT" "$LEGACY_DIR" || die "无法把旧目录移到 $LEGACY_DIR"
+    ln -s "$TARGET_DIR" "$DEST_ROOT" || die "无法创建软链 ${DEST_ROOT}（旧布局已保留在 ${LEGACY_DIR}）"
+    printf '  旧布局已转为软链：%s → %s\n' "$DEST_ROOT" "$(readlink "$DEST_ROOT")"
+    printf '  旧目录保留：%s\n' "$LEGACY_DIR"
+else
+    # 原子切换：先在旁边建好新软链，再 rename 覆盖旧软链。rename(2) 是原子的，
+    # 不存在「指向半个目录」或「安装根消失」的中间状态。
+    _lnk="$DEST_ROOT.new.$$"
+    rm -f "$_lnk"
+    ln -s "$TARGET_DIR" "$_lnk" || die "无法创建临时软链 $_lnk"
+    _swap_link "$_lnk" "$DEST_ROOT" || {
+        rm -f "$_lnk"
+        die "无法替换 ${DEST_ROOT}（当前仍指向旧版本）"
+    }
+fi
+
+printf '\n'
+printf '\033[1;32m==>\033[0m ordo 已更新：%s → %s\n' "$CURRENT_VERSION" "$NEW_VERSION"
+printf '    安装根：%s → %s\n' "$DEST_ROOT" "$(readlink "$DEST_ROOT" 2>/dev/null || printf '%s' "$TARGET_DIR")"
+printf '    旧版本保留在 %s（需要时手工删除）\n' "$STORE"
+printf '    下次执行 ordo 即用新版本；运行中的进程不受影响。\n'
+exit "$ORDO_EXIT_OK"

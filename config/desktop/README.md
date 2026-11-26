@@ -10,7 +10,7 @@ Noctalia 全家桶。五个组件同一来源、同一套视觉、同一份配�
 | 外壳 | **Noctalia Shell** | `noctalia/config.toml` |
 | 文件管理器 | **Luciole** | 无配置（读系统图标与门户） |
 | 登录屏 | **Noctalia Greeter** | `greetd/config.toml` |
-| 门户 | **xdg-desktop-portal-umbriel** | 由 Umbriel 拉起 |
+| 门户 | **xdg-desktop-portal-umbriel** | `portals.conf`（后端选择） |
 
 外壳包含顶栏、启动器、控制中心、通知、锁屏、壁纸、剪贴板历史、OSD、
 系统托盘、桌面小组件 —— 这些以前是六个独立组件，现在是同一份 TOML。
@@ -28,7 +28,9 @@ config/desktop/{umbriel,noctalia,greetd}/*.toml
 唯一例外是 `~/.config/wezterm/wezterm.lua`：它按手册要由用户原地编辑，
 且 Noctalia 的 wezterm 模板会往里写色名。`ordo config apply desktop`
 （以及会话入口 `ordo-umbriel-session`，用于修复旧系统里的软链）把它落成
-属主是桌面用户的真实副本；其余文件仍是软链。
+属主是桌面用户的真实副本；其余文件仍是软链。`~/.config/xdg-desktop-portal/portals.conf`
+是会话入口从 `portals.conf` 生成的用户级副本（门户的 XDG 查找规则要求这个
+文件不能是软链指向 `/opt`），内容以本目录的声明为准。
 
 ## 密钥服务契约
 
@@ -54,7 +56,25 @@ keyring，PAM 无法用登录密码解锁，应用访问时会提示一次。备
 `login.keyring`/`default.keyring`，下次登录会按登录密码重建。
 
 验收：`sh config/desktop/keyring-policy.sh check`（0 声明与接线齐备 / 1 缺件 /
-2 无法判定）。它检查 world、`config/package.mask`、greetd PAM 两行与会话启动行。
+2 无法判定）。它检查 world、`config/package.mask`、greetd PAM 两行与会话启动行；
+有会话总线时再做一次 `secret-tool` 往返。
+
+## 门户契约
+
+`portals.conf` 把三个接口固定到 umbriel 门户，其余接口 `default=gtk`：
+
+| 接口 | 后端 | 消费者 |
+|---|---|---|
+| FileChooser | umbriel | Luciole（文件选择器） |
+| Screenshot | umbriel | 截图/录屏 |
+| ScreenCast | umbriel | 录屏 |
+| 其余 | gtk | 主题/通知等 |
+
+部署路径有两条：会话入口 `ordo-umbriel-session` 每次登录写用户级
+`~/.config/xdg-desktop-portal/portals.conf`（优先于系统级）；M2 安装器经
+`m2-desktop-fix.sh` 写系统级 `/etc/xdg-desktop-portal/portals.conf`。
+`ordo doctor` 会检查生效文件的三项后端，并对会话总线上的
+`org.freedesktop.portal.Desktop` 做 `busctl --user introspect`。
 
 ## 为什么是这一套
 

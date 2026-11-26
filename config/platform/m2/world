@@ -1,6 +1,5 @@
 media-libs/mesa::gentoo
 x11-apps/mesa-progs
-sys-power/upower
 media-libs/libv4l
 media-sound/alsa-utils
 =media-libs/alsa-ucm-conf-asahi-10::asahi

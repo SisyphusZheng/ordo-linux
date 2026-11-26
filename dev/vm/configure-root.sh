@@ -63,7 +63,7 @@ for level in /etc/runlevels/*; do
 done
 
 install -d /usr/local/bin
-for entry in ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck; do
+for entry in ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck ordo-wifi ordo-maintenance ordo-selfupdate; do
     test -x "$repo/scripts/$entry"
     ln -sfn "$repo/scripts/$entry" "/usr/local/bin/$entry"
 done
@@ -143,6 +143,11 @@ dracut --zstd --no-hostonly --no-early-microcode --force "/boot/initramfs-$relea
 install -D -m 644 "$vm/zfsbootmenu.yaml" /etc/zfsbootmenu/config.yaml
 generate-zbm --kver "$release"
 test -s /efi/EFI/BOOT/BOOTAA64.EFI
+
+# 维护定时任务（快照 + 每月 scrub）：装配器与 install.sh / M2 外置安装共用
+# scripts/ordo-maintenance。VM 镜像过去只有 cronie 服务，没有任何 cron 文件。
+sh "$repo/scripts/ordo-maintenance" enable \
+    || { printf '维护定时任务装配失败（快照与 scrub 都不会运行）\n' >&2; exit 1; }
 
 # ---- 构建清单（P1-02）----
 # VM 装配是清单的第三个生产者：verify 在镜像里只认这份清单，

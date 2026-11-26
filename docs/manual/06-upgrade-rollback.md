@@ -2,6 +2,10 @@
 
 > 本章说明升级流程、回滚机制与快照策略。
 
+> 首次从「真实目录」迁移到「版本目录 + 软链」时是两步（旧目录整体保留在
+> `/opt/ordo.d/legacy-<版本>`），不是一次 rename；之后每次更新才是一次原子 rename。
+> 迁移中断时旧目录仍在，重跑 `ordo selfupdate` 即可。
+
 ## 升级
 
 ```sh
@@ -14,15 +18,32 @@ doas ordo sysup
 2. 给**当前运行的数据集**打快照 `@pre-update-<时间戳>`
 3. 用 `zfs hold` 钉住这个快照（防止被自动轮转删掉）
 4. `emerge --sync` → `emerge -uDN @world`
-5. 运行待执行的迁移（`ordo migrate`）
-6. 检查最新已安装内核的 initramfs 和对应 ZFS 模块，以及当前启动环境的 ZFSBootMenu 属性
-7. 全过才释放 hold；不过则保留 hold 并告诉你
+5. 更新 `/opt/ordo`（`ordo selfupdate`；没有配置更新源时跳过）
+6. 运行待执行的迁移（`ordo migrate`）
+7. 检查最新已安装内核的 initramfs 和对应 ZFS 模块，以及当前启动环境的 ZFSBootMenu 属性
+8. 全过才释放 hold；不过则保留 hold 并告诉你
 
 先看看会发生什么（不改任何东西）：
 
 ```sh
 doas ordo sysup --dry-run
 ```
+
+## ordo 自身怎么更新
+
+迁移脚本与工具随发行版发布，`/opt/ordo` 不是只读的装机副本。
+
+```sh
+doas ordo selfupdate --check          # 看当前版本与更新源
+doas ordo selfupdate --from /path/ordo-<版本>.tar.gz --sha256 <摘要>
+```
+
+`sysup` 在跑迁移之前会先调用一次自更新：新迁移可能只存在于新版本里。
+更新源按 `--from`、`/etc/ordo/selfupdate.conf`（`url=` 与 `sha256=`）、
+`ORDO_SELFUPDATE_SOURCE` 的顺序读取；三者都没有时跳过自更新（离线机器），
+迁移由当前版本执行。摘要不匹配、解包结构不符或新版本自检失败都会中止，
+升级快照仍然保留。安装根是指向 `/opt/ordo.d/<版本>` 的软链，切换是一次
+rename；旧版本目录保留，需要手工清理。
 
 ## 升级炸了怎么办
 
@@ -65,13 +86,21 @@ ordo snap identity                # 我到底跑在哪个数据集上？
 **快照和你的数据在同一个池里**——池坏了，快照跟着一起没。真正的备份必须离池。
 
 ```sh
-doas ordo backup send /mnt/usb         # zfs send 到外置盘
+doas ordo backup send /mnt/usb         # 两个流：运行根 + /home，附一份 manifest
 ordo backup list
-doas ordo backup verify /mnt/usb/xxx.zfs
+doas ordo backup verify /mnt/usb       # 取最新 manifest，逐流 zfs receive -n 干跑
 ```
 
+目标必须是**目录**：`send` 默认发两个单数据集流（运行中的根与 `/home`），
+并写一份 `backup-<时间戳>.manifest` 记录两个流的文件名、大小与快照名。
+`verify` 给目录或 manifest 时会逐个流校验，缺 `/home` 流的旧备份会被点名。
+`/home` 没有可用快照时 `send` 会拒绝——先 `doas ordo snap create`（它会给
+`/home` 打同名快照）。只要根数据集时显式加 `--root-only`（单流，不写
+manifest；单文件目标也必须这样，否则命令会拒绝）。
+
 `ordo backup` 刻意做了这些保守选择：先写 `.part` 再改名、目标已存在拒绝覆盖
-（要 `--force`）、发送前算大小、**绝不自动删备份**。
+（要 `--force`）、发送前按各流 refer 之和算大小、任一流的发送失败就删除
+已落盘的根流（避免半套被当成完整备份）、**绝不自动删备份**。
 
 ## 回滚后系统"名字不对"是正常的
 

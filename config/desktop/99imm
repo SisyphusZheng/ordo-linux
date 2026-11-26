@@ -1,5 +1,6 @@
-# GTK 通过 Wayland text-input-v3 连接 fcitx5。Xwayland 应用使用 XMODIFIERS。
+# 输入法走合成器的 text-input-v3（GTK/Qt 各自的最短路径）。
+# GTK 显式设 wayland；X11/XIM 与 SDL 也保留显式变量。fcitx-qt 未安装，
+# 不设 QT_IM_MODULE：设成 fcitx 会让 Qt 去找不存在的 immodule 插件。
 GTK_IM_MODULE=wayland
-QT_IM_MODULE=fcitx
 XMODIFIERS="@im=fcitx"
 SDL_IM_MODULE=fcitx

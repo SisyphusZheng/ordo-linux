@@ -513,9 +513,9 @@ for svc in dbus:default elogind:boot zfs-import:boot zfs-mount:boot; do
     name="${svc%%:*}"; lvl="${svc##*:}"
     rc-update add "$name" "$lvl" || die "关键服务 $name 注册失败 —— 系统将无法启动"
 done
-for svc in NetworkManager:default zfs-zed:default chronyd:default cronie:default; do
+for svc in NetworkManager:default zfs-zed:default chronyd:default cronie:default sysklogd:default; do
     name="${svc%%:*}"; lvl="${svc##*:}"
-    rc-update add "$name" "$lvl" || warn "服务 $name 注册失败（网络/时间/快照相关，可后补）"
+    rc-update add "$name" "$lvl" || warn "服务 $name 注册失败（网络/时间/快照/日志相关，可后补）"
 done
 # sshd 默认**不开**：单用户桌面机不需要远程登录，
 # 而 doas 已能本地提权。需要时用 ORDO_SSH=1 ./install.sh 显式开启。
@@ -528,6 +528,46 @@ else
 fi
 # chronyd 已在上面的服务循环里注册（net-misc/chrony 由 config/world 提供）。
 # 没有 NTP 会连锁出：TLS 校验失败、快照/cron 时间戳错乱、ZBM 菜单时间漂移。
+
+# ---- 7a) 系统日志（诊断前置）----
+# 没有 syslog 守护时 logger(1) 写进虚空，/var/log 只剩 dmesg 与 emerge 输出。
+# 合盖冻结、池 suspend、扬声器保护失效这三类故障的共同点是「事后没有现场」，
+# 所以 syslog 是它们的前置条件，而不是可选装饰。
+# 配置文件在这里生成而不是从 config/ 拷贝：M2 安装器的 rootfs 是预构建的
+# tarball，读不到仓库新增文件；两处用同一份文本，用例 376 断言两边一致。
+say "配置系统日志（sysklogd + logrotate + rc_logger）"
+cat > /etc/syslog.conf <<'SYSLOG'
+# Ordo — syslog 定义（install.sh §7a 与 M2 安装器同文）
+# 全部 facility 收进一个文件：诊断要按时间顺序看现场，拆文件拼不回时间线。
+*.*                                             /var/log/messages
+SYSLOG
+chmod 644 /etc/syslog.conf
+mkdir -p /etc/logrotate.d
+cat > /etc/logrotate.d/ordo <<'LOGROTATE'
+# Ordo — syslog 轮转。缺这一条时 messages 会一直长到吃满外置系统盘。
+/var/log/messages {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    postrotate
+        /etc/init.d/sysklogd reload >/dev/null 2>&1 || true
+    endscript
+}
+LOGROTATE
+chmod 644 /etc/logrotate.d/ordo
+# rc_logger：OpenRC 把服务启动/停止写进 /var/log/rc.log。
+# 起不来时这是唯一能定位「哪个服务卡住」的记录。
+if [ -f /etc/rc.conf ]; then
+    if grep -qE '^[#[:space:]]*rc_logger=' /etc/rc.conf; then
+        sed -i -E 's|^[#[:space:]]*rc_logger=.*|rc_logger="YES"|' /etc/rc.conf
+    else
+        printf '\nrc_logger="YES"\n' >> /etc/rc.conf
+    fi
+else
+    warn "缺少 /etc/rc.conf（baselayout 未装？）—— 跳过 rc_logger"
+fi
 
 # ---- 8) 输入法：fcitx5 + rime（唯一路径）----
 # 【为什么删掉了 ibus 与 GNOME dconf】桌面栈只用 fcitx5，
@@ -589,20 +629,10 @@ emerge -1 --noreplace app-shells/zsh app-shells/starship \
 # cronie：定时快照 + 每月 scrub 依赖它（审查者指出 install.sh 从未装过 cronie）
 rc-update add cronie default 2>/dev/null || warn "cronie 服务注册失败"
 
-# ---- 11b-bis) 每月 scrub（ZFS 发行版的标配，审查者指出完全缺失）----
-mkdir -p /etc/cron.monthly
-cat > /etc/cron.monthly/zfs-scrub <<'SCRUB'
-#!/bin/sh
-# 每月池 scrub（读全盘校验 checksum，发现并修复静默损坏）
-POOL="${ORDO_POOL:-rpool}"
-if zpool list -H -o name 2>/dev/null | grep -qx "$POOL"; then
-    logger -t ordo-scrub "starting scrub on $POOL"
-    zpool scrub "$POOL" 2>&1 | logger -t ordo-scrub
-else
-    logger -t ordo-scrub "pool $POOL not found, skip"
-fi
-SCRUB
-chmod 755 /etc/cron.monthly/zfs-scrub
+# ---- 11b-bis) 维护定时任务 ----
+# 每月 scrub 与每小时快照的文本统一由 scripts/ordo-maintenance 提供
+# （M2 外置安装与 VM 装配器也调它，文本只定义一次）。
+# 这里不写：§11 装完 CLI 后由 §16 统一调用一次。
 
 # ---- 11b-ter) Flatpak 应用层（宪法"Flatpak-first"；此前 install.sh 完全缺失）----
 # 包本体：sys-apps/flatpak 已在 config/world 基线内 → 由本脚本 §5 的 emerge @world 装上，
@@ -692,7 +722,7 @@ if [ -d "$REPO_DIR/scripts" ]; then
 
     # 入口白名单：只软链**用户会敲的命令**，内部脚本（lib.sh / ordo-i18n.sh）
     # 不暴露到 PATH，避免污染命令空间。
-    for _entry in ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck ordo-wifi; do
+    for _entry in ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck ordo-wifi ordo-maintenance ordo-selfupdate; do
         [ -f "/opt/ordo/scripts/$_entry" ] || continue
         ln -sf "/opt/ordo/scripts/$_entry" "/usr/local/bin/$_entry"
     done
@@ -953,6 +983,9 @@ chown -R ordo:ordo /home/ordo/.config 2>/dev/null || true
 #      这里必须晚于 §11（/opt/ordo/config 已就位）与 useradd（家目录存在）。
 if [ -x /opt/ordo/scripts/ordo-config ]; then
     # 失败即停（AGENTS.md）：桌面配置未部署的系统 = 启动即裸奔，不允许带病完成安装
+    # 系统级门户配置：用户级副本由会话脚本每次登录刷新，这里是给 root 会话/服务兜底。
+    install -Dm644 /opt/ordo/config/desktop/portals.conf /etc/xdg-desktop-portal/portals.conf 2>/dev/null \
+        || warn "portals.conf 未落位（doctor 会报缺件）"
     HOME=/home/ordo /opt/ordo/scripts/ordo-config apply desktop \
         || die "ordo config apply desktop 失败——桌面配置未部署（修复后重跑安装）"
     # 必须 -h：coreutils 的 chown -R 默认跟随符号链接，会把软链目标
@@ -1000,21 +1033,13 @@ else
     done
 fi
 
-# ---- 16) 定时快照（宪法承诺"快照全自动"的落点）----
-# 【评审发现】旧版只在文档里说 cron 会调 ordo-snap-auto，但从不创建 cron 文件，
-# README 却写"快照全自动"——承诺与实现之间没有任何东西。
-say "启用定时快照"
-mkdir -p /etc/cron.d
-cat > /etc/cron.d/ordo-snapshot <<'CRON'
-# ordo 定时快照：每小时一次，分档保留（24 小时 / 7 天 / 4 周）
-# 执行体是 repo 的 scripts/ordo-snap-auto（§11 安装到 /opt/ordo/scripts/，
-# 软链到 /usr/local/bin），对象是 RUNNING_ROOT（回滚后也对）
-SHELL=/bin/sh
-PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin
-17 * * * * root /usr/local/bin/ordo-snap-auto >/dev/null 2>&1
-CRON
-chmod 644 /etc/cron.d/ordo-snapshot
-rc-update add cronie default 2>/dev/null || warn "cronie 注册失败（定时快照不会运行）"
+# ---- 16) 定时快照与每月 scrub（宪法承诺"快照全自动"的落点）----
+# 【评审发现】旧版只在文档里说 cron 会调 ordo-snap-auto，但从不创建 cron 文件；
+# M2 外置安装又完全没写这个文件（D1-6）。现在文本只有一份：
+# scripts/ordo-maintenance，三条安装路径都调它（用例 379 断言调用点）。
+say "启用维护定时任务（快照 + 每月 scrub）"
+sh /opt/ordo/scripts/ordo-maintenance enable \
+    || die "维护定时任务装配失败（快照与 scrub 都不会运行）"
 
 # ---- 17) 构建清单（P1-02：verify 的期望值来源）----
 # 旧版的 `ordo config verify` 拿 /opt/ordo/config 和由它自己派生出的
@@ -1025,6 +1050,13 @@ rc-update add cronie default 2>/dev/null || warn "cronie 注册失败（定时�
 say "写入构建清单（/etc/ordo/build-manifest）"
 sh /opt/ordo/scripts/ordo-build-manifest / "$ORDO_PLATFORM" "$ARCH" \
     || die "构建清单生成失败（/etc/ordo/build-manifest）"
+
+# 构建/验收残留：交付镜像曾带着 80G 构建缓存与占 18% 空间的测试 BE。
+# 清理判据（bootfs 不在候选中）在脚本内部，安装器只负责调用一次；
+# 失败不连坐安装完成 —— 用户可稍后手动跑 ordo snap cleanup-build。
+say "清理构建残留数据集"
+sh /opt/ordo/scripts/ordo-snap cleanup-build \
+    || warn "构建残留清理未完成（稍后可执行 doas ordo snap cleanup-build）"
 
 say "chroot 完成"
 CHROOT

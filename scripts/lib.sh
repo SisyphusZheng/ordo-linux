@@ -196,3 +196,78 @@ require_root() {
     fi
     exit "$ORDO_EXIT_BAD"
 }
+
+# ---------------------------------------------------------------------------
+# 迁移脚本的 atom 审计（A2）
+#
+# 背景：1795627149-remove-gnome-keyring.sh 引用了已删除的
+# app-crypt/libsecret::local，sysup 在迁移阶段必然失败 —— 已装机的用户被
+# 卡在一个永远跑不过的迁移上。
+#
+# 判据（只扫出现 emerge / has_version 的行）：
+#   - 带 ::local 的 atom：overlay/<类别>/<包> 必须仍然存在；
+#   - 不带仓库限定（或 ::gentoo）的 atom：必须在 world 或任一平台 world 里；
+#   - 其他外部仓库（guru/asahi 等）：本机无仓库元数据，跳过不算通过。
+#
+# 用法：ordo_migration_dangling_atoms <config 目录> [overlay 目录]
+# 输出：每行「<文件>:<atom>」；无输出且退出 0 = 没有悬空 atom。
+ordo_migration_dangling_atoms() {
+    _ma_conf=${1:?config 目录}
+    _ma_overlay=${2:-$(dirname "$_ma_conf")/overlay}
+    _ma_tmp=$(mktemp -d "${TMPDIR:-/tmp}/ordo-mig-atoms.XXXXXX") || return 1
+
+    # 声明集合：world + 平台 world + overlay 现有包
+    : > "$_ma_tmp/declared"
+    for _ma_f in "$_ma_conf/world" "$_ma_conf/world.bare-metal" \
+                 "$_ma_conf"/world.bare-metal.* "$_ma_conf"/platform/*/world \
+                 "$_ma_conf"/platform/*/world.base; do
+        [ -f "$_ma_f" ] || continue
+        sed -e 's/#.*//' "$_ma_f" | awk 'NF { print $1 }' \
+            | sed -e 's/^[<>=~]*//' -e 's/::.*$//' -e 's/\[.*$//' -e 's/-[0-9].*$//' \
+            >> "$_ma_tmp/declared"
+    done
+    if [ -d "$_ma_overlay" ]; then
+        for _ma_d in "$_ma_overlay"/*/*/; do
+            [ -d "$_ma_d" ] || continue
+            _ma_rel=${_ma_d#*"$_ma_overlay"/}
+            printf '%s\n' "${_ma_rel%/}" >> "$_ma_tmp/declared"
+        done
+    fi
+    sort -u "$_ma_tmp/declared" -o "$_ma_tmp/declared"
+
+    _ma_found=0
+    for _ma_mig in "$_ma_conf"/migrations/*.sh; do
+        [ -f "$_ma_mig" ] || continue
+        awk '/emerge|has_version/ { for (i = 1; i <= NF; i++) print $i }' "$_ma_mig" \
+            | sed -e 's/^["'\'']//' -e 's/["'\'']$//' \
+            | sed -n 's/^[<>=~]*\([a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9.+-]*\)\(::[a-z0-9_-]*\)\{0,1\}.*/\1\2/p' \
+            | sort -u > "$_ma_tmp/atoms"
+        while IFS= read -r _ma_atom; do
+            [ -n "$_ma_atom" ] || continue
+            _ma_repo=""
+            case "$_ma_atom" in
+                *::*) _ma_repo=${_ma_atom##*::}; _ma_base=${_ma_atom%%::*} ;;
+                *)    _ma_base=$_ma_atom ;;
+            esac
+            case "$_ma_repo" in
+                '')
+                    grep -Fxq "$_ma_base" "$_ma_tmp/declared" || {
+                        printf '%s:%s\n' "${_ma_mig##*/}" "$_ma_atom"
+                        _ma_found=$((_ma_found + 1))
+                    }
+                    ;;
+                local)
+                    if [ ! -d "$_ma_overlay/$_ma_base" ]; then
+                        printf '%s:%s\n' "${_ma_mig##*/}" "$_ma_atom"
+                        _ma_found=$((_ma_found + 1))
+                    fi
+                    ;;
+                gentoo) ;;
+                *) ;;   # 外部仓库：无本地元数据，跳过（不算通过）
+            esac
+        done < "$_ma_tmp/atoms"
+    done
+
+    rm -rf "$_ma_tmp"
+    [ "$_ma_found" -eq 0 ]
+}

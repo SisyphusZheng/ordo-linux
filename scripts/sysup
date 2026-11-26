@@ -16,6 +16,7 @@ ordo_require_tools awk sed grep cat date printf
 SNAPSHOT=1
 DRY_RUN=0
 RUN_MIGRATE=1
+RUN_SELFUPDATE=1
 ASSUME_YES=0
 
 # ---- 参数解析（旧版不解析，任何未知 flag 都被静默忽略并照常升级）----
@@ -24,6 +25,7 @@ for _arg in "$@"; do
         --no-snapshot) SNAPSHOT=0 ;;
         --dry-run)     DRY_RUN=1 ;;
         --no-migrate)  RUN_MIGRATE=0 ;;
+        --no-selfupdate) RUN_SELFUPDATE=0 ;;
         --yes|-y)      ASSUME_YES=1 ;;
         -h|--help)
             cat <<EOF
@@ -32,10 +34,12 @@ for _arg in "$@"; do
   --no-snapshot   跳过升级前快照（不推荐：没有回滚点）
   --dry-run       只显示将要做什么，不做任何变更
   --no-migrate    升级后不运行 ordo migrate
+  --no-selfupdate 不从发布 tarball 更新 /opt/ordo（不推荐）
   --yes, -y       不询问（供自动化使用）
 
-升级流程：快照(hold) → emerge --sync → emerge -uDN @world → 迁移 →
-          可用性校验（内核/ZFS 模块/ZBM）→ 同步 M2 外置 EFI → 释放 hold
+升级流程：快照(hold) → emerge --sync → emerge -uDN @world →
+          更新 /opt/ordo（自更新）→ 迁移 → 可用性校验（内核/ZFS 模块/ZBM）→
+          同步 M2 外置 EFI → 释放 hold
 失败：    中止并打印 ZFSBootMenu 回滚路径；快照保留为回滚点
 EOF
             exit "$ORDO_EXIT_OK"
@@ -67,9 +71,10 @@ if [ "$DRY_RUN" -eq 1 ]; then
     [ "$SNAPSHOT" -eq 1 ] && printf '  1. zfs snapshot %s\n' "$SNAP" || printf '  1. （跳过快照）\n'
     printf '  2. emerge --sync\n'
     printf '  3. emerge -uDN --keep-going @world\n'
-    [ "$RUN_MIGRATE" -eq 1 ] && printf '  4. ordo migrate\n'
-    printf '  5. 可用性校验（dracut 产物 / ZFS 模块 / ZBM active），M2 同步外置 EFI\n'
-    [ "$SNAPSHOT" -eq 1 ] && printf '  6. zfs release %s\n' "$HOLD_TAG"
+    [ "$RUN_SELFUPDATE" -eq 1 ] && printf '  4. ordo-selfupdate（有更新源时）\n'
+    [ "$RUN_MIGRATE" -eq 1 ] && printf '  5. ordo migrate\n'
+    printf '  6. 可用性校验（dracut 产物 / ZFS 模块 / ZBM active），M2 同步外置 EFI\n'
+    [ "$SNAPSHOT" -eq 1 ] && printf '  7. zfs release %s\n' "$HOLD_TAG"
     exit "$ORDO_EXIT_OK"
 fi
 
@@ -159,6 +164,34 @@ fi
 # 配置迁移与下次启动检查共用失败状态。保留快照直至全部通过。
 _check_fail=0
 _unknown=0
+
+# 0) 自更新：迁移脚本随发行版发布，旧副本可能根本没有新迁移。
+#    【为什么必须在 migrate 之前】旧镜像的 /opt/ordo 是冻结副本；如果先按
+#    旧版本跑迁移，新迁移要么不存在、要么调用已被修掉的旧逻辑（D1-4）。
+#    退出码 2 = 没有配置更新源（离线机器是常态）：跳过但不当作成功。
+#    退出码 1 = 校验/安装失败：中止升级并保留快照 hold（迁移不要再跑）。
+if [ "$RUN_SELFUPDATE" -eq 1 ]; then
+    ordo_say "更新 ordo 工具链（自更新）"
+    _su_rc=0
+    if [ -x "$_dir/ordo-selfupdate" ]; then
+        "$_dir/ordo-selfupdate" || _su_rc=$?
+    else
+        # 旧布局没有自更新脚本：跳过而不是中止 —— 中止会让这些机器
+        # 再也拿不到 world 升级（它们最需要升级）。
+        ordo_warn "缺少 $_dir/ordo-selfupdate（安装不完整）：跳过自更新"
+        _su_rc=0
+    fi
+    case "$_su_rc" in
+        0) ;;
+        2) ordo_warn "没有配置更新源，跳过自更新（本次迁移由当前版本执行）" ;;
+        *)
+            ordo_bad "自更新失败，中止升级（快照 $SNAP 仍保留 hold）"
+            ordo_bad "  修复后重跑：doas ordo selfupdate；或临时用 --no-selfupdate 跳过"
+            exit "$ORDO_EXIT_BAD"
+            ;;
+    esac
+fi
+
 if [ "$RUN_MIGRATE" -eq 1 ]; then
     ordo_say "运行待执行迁移"
     if ! "$_dir/ordo-migrate"; then

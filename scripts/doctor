@@ -740,6 +740,213 @@ EOF
     fi
 fi
 
+# 13.6) Secret Service 运行时往返（D0-1 / C1）
+#       声明、PAM、会话脚本全对，服务也可能没起或 login keyring 没解锁。
+#       判据是 secret-tool 的 store → lookup 往返；缺工具或无会话总线都是
+#       无法判定（skip），不是通过。doas 会清掉 DBUS_SESSION_BUS_ADDRESS，
+#       所以运行时验收要在桌面会话里以 ordo 用户运行 doctor。
+if ! command -v secret-tool >/dev/null 2>&1; then
+    skip "secret-tool 不可用（app-crypt/libsecret 未部署），无法验收密钥服务（不是通过）"
+elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    skip "无会话总线，无法验收密钥服务（在桌面会话里运行 doctor；不是通过）"
+else
+    _ss_probe="ordo-doctor-$$"
+    if printf '%s' "$_ss_probe" | secret-tool store --label='Ordo doctor probe' \
+           service ordo-doctor probe "$$" >/dev/null 2>&1; then
+        _ss_got=$(secret-tool lookup service ordo-doctor probe "$$" 2>/dev/null || true)
+        secret-tool clear service ordo-doctor probe "$$" >/dev/null 2>&1 || true
+        if [ "$_ss_got" = "$_ss_probe" ]; then
+            ok "Secret Service 往返通过（secret-tool store/lookup）"
+        else
+            bad "Secret Service 往返失败（lookup 结果与写入不一致：login keyring 未解锁？）"
+        fi
+    else
+        bad "Secret Service 不可用（secret-tool store 失败：gnome-keyring 未随会话启动或未解锁）"
+        bad "  排查：pgrep -a gnome-keyring-daemon；确认以桌面用户运行（不是 doas）"
+    fi
+    unset _ss_probe _ss_got
+fi
+
+# 13.7) 门户后端与运行时（D2-4 / C2）
+#       文件选择器/截图/录屏必须指向 umbriel；缺 portals.conf 时
+#       xdg-desktop-portal 按默认把文件选择器交给 gtk，Luciole 失去门户职责。
+_ordo_portal_conf=""
+if [ -n "${XDG_CONFIG_HOME:-}" ] && [ -f "${XDG_CONFIG_HOME}/xdg-desktop-portal/portals.conf" ]; then
+    _ordo_portal_conf="${XDG_CONFIG_HOME}/xdg-desktop-portal/portals.conf"
+elif [ -n "${HOME:-}" ] && [ -f "${HOME}/.config/xdg-desktop-portal/portals.conf" ]; then
+    _ordo_portal_conf="${HOME}/.config/xdg-desktop-portal/portals.conf"
+elif [ -f /etc/xdg-desktop-portal/portals.conf ]; then
+    _ordo_portal_conf=/etc/xdg-desktop-portal/portals.conf
+else
+    # root 经 doas 跑 doctor：HOME=/root，用户级配置在 /home/*；唯一才算数。
+    _ordo_portal_n=0
+    for _ordo_portal_c in /home/*/.config/xdg-desktop-portal/portals.conf; do
+        [ -f "$_ordo_portal_c" ] || continue
+        _ordo_portal_n=$((_ordo_portal_n + 1))
+        _ordo_portal_conf="$_ordo_portal_c"
+    done
+    [ "$_ordo_portal_n" -eq 1 ] || _ordo_portal_conf=""
+    unset _ordo_portal_c _ordo_portal_n
+fi
+if ! command -v xdg-desktop-portal >/dev/null 2>&1 &&
+   [ ! -x /usr/libexec/xdg-desktop-portal ] && [ ! -x /usr/lib/xdg-desktop-portal ] &&
+   [ ! -e /usr/share/dbus-1/services/org.freedesktop.portal.Desktop.service ]; then
+    skip "xdg-desktop-portal 未安装，无法检查门户（不是通过）"
+elif [ -z "$_ordo_portal_conf" ]; then
+    bad "缺少 portals.conf：文件选择器会落到 gtk，Luciole 不是门户选择器"
+    bad "  修复：登录一次（会话入口自动部署）；或 install -Dm644 /opt/ordo/config/desktop/portals.conf /etc/xdg-desktop-portal/portals.conf"
+else
+    _ordo_portal_bad=""
+    for _ordo_portal_k in FileChooser Screenshot ScreenCast; do
+        grep -Eq "^[[:space:]]*org[.]freedesktop[.]impl[.]portal[.]${_ordo_portal_k}[[:space:]]*=[[:space:]]*umbriel[[:space:]]*$" \
+            "$_ordo_portal_conf" 2>/dev/null || _ordo_portal_bad="$_ordo_portal_bad ${_ordo_portal_k}"
+    done
+    if [ -n "$_ordo_portal_bad" ]; then
+        bad "portals.conf 未把${_ordo_portal_bad} 指向 umbriel（${_ordo_portal_conf}）"
+    else
+        ok "门户后端指向 umbriel（${_ordo_portal_conf}）"
+    fi
+    unset _ordo_portal_bad _ordo_portal_k
+fi
+unset _ordo_portal_conf
+if ! command -v busctl >/dev/null 2>&1; then
+    skip "busctl 不可用，无法内省 xdg-desktop-portal（不是通过）"
+elif [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    skip "无会话总线，无法内省 xdg-desktop-portal（不是通过）"
+elif busctl --user introspect org.freedesktop.portal.Desktop \
+        /org/freedesktop/portal/desktop >/dev/null 2>&1; then
+    ok "xdg-desktop-portal 在会话总线上可内省"
+else
+    bad "xdg-desktop-portal 不在会话总线上（Flatpak 文件选择/截屏会失败）"
+    bad "  排查：pgrep -af xdg-desktop-portal；busctl --user list | grep portal"
+fi
+
+# 13.8) syslog（D1-3）—— 没有它，睡眠/掉盘/唤醒故障只剩 dmesg。
+if [ ! -e /etc/init.d/sysklogd ] && ! command -v syslogd >/dev/null 2>&1; then
+    case "$(cat /etc/ordo/platform 2>/dev/null || :)" in
+        m2|m2-native|vm|bare-metal)
+            bad "syslog 未安装（/var/log/messages 不会更新，故障无日志）"
+            bad "  修复：emerge app-admin/sysklogd && rc-update add sysklogd default" ;;
+        *) skip "未检测到 Ordo 安装，无法判断 syslog（不是通过）" ;;
+    esac
+elif ! command -v rc-service >/dev/null 2>&1; then
+    skip "rc-service 不可用，无法判断 sysklogd 是否运行（不是通过）"
+elif rc-service sysklogd status 2>/dev/null | grep -q started; then
+    if [ -f /var/log/messages ]; then
+        ok "syslog 运行中（/var/log/messages）"
+    else
+        warn "sysklogd 在运行，但 /var/log/messages 不存在（检查 /etc/syslog.conf）"
+    fi
+else
+    bad "sysklogd 未运行（/var/log/messages 不会更新）"
+    bad "  修复：rc-service sysklogd start; rc-update add sysklogd default"
+fi
+
+# 13.9) 外接盘睡眠策略（D0-2 / B1）—— 文件存在就逐项验收；
+#       根池在外接 USB 上却没有策略时，合盖/睡眠会把池挂起。
+_ordo_sleep_conf=/etc/elogind/logind.conf.d/10-ordo-external-root.conf
+_ordo_sleep_hook=/lib/elogind/system-sleep/50-ordo-root-pool.sh
+if [ -e "$_ordo_sleep_conf" ] || [ -e "$_ordo_sleep_hook" ]; then
+    _ordo_sleep_bad=""
+    [ -r "$_ordo_sleep_conf" ] || _ordo_sleep_bad="$_ordo_sleep_bad logind.conf.d"
+    [ -x "$_ordo_sleep_hook" ] || _ordo_sleep_bad="$_ordo_sleep_bad system-sleep 钩子"
+    for _ordo_sleep_k in HandleLidSwitch HandleLidSwitchExternalPower HandleSuspendKey HandleHibernateKey; do
+        grep -Eq "^[[:space:]]*${_ordo_sleep_k}[[:space:]]*=[[:space:]]*ignore[[:space:]]*$" \
+            "$_ordo_sleep_conf" 2>/dev/null || _ordo_sleep_bad="$_ordo_sleep_bad ${_ordo_sleep_k}"
+    done
+    if [ -n "$_ordo_sleep_bad" ]; then
+        bad "外接盘睡眠策略不完整（${_ordo_sleep_bad# }）"
+    else
+        ok "外接盘睡眠策略完整（四项 ignore + post 钩子）"
+    fi
+    unset _ordo_sleep_bad _ordo_sleep_k
+else
+    case "$(cat /etc/ordo/platform 2>/dev/null || :)" in
+        m2|m2-native)
+            _ordo_sleep_vdev=""
+            if command -v zpool >/dev/null 2>&1; then
+                _ordo_sleep_vdev=$(zpool status -P "$POOL" 2>/dev/null | awk '$1 ~ /^\/dev\// { print $1; exit }')
+            fi
+            case "$_ordo_sleep_vdev" in
+                "")
+                    skip "未安装外接盘睡眠策略，且无法读取根池设备（不是通过）" ;;
+                /dev/nvme*)
+                    ok "根池在 NVMe（${_ordo_sleep_vdev}），不需要外接盘睡眠策略" ;;
+                *)
+                    bad "根池在外接盘（${_ordo_sleep_vdev}）但未安装睡眠策略（合盖会让池 suspend）"
+                    bad "  修复：重跑 install-external.sh；说明见 docs/manual/10-m2-external.md" ;;
+            esac
+            unset _ordo_sleep_vdev ;;
+        *) skip "未检测到外接盘睡眠策略（非 M2 平台；不是通过）" ;;
+    esac
+fi
+unset _ordo_sleep_conf _ordo_sleep_hook
+
+# 13.10) 维护定时任务（D1-6 / A3）
+if [ ! -e /etc/ordo/platform ]; then
+    skip "未检测到 Ordo 安装，无法检查维护 cron（不是通过）"
+elif [ -x "$_dir/ordo-maintenance" ]; then
+    _ordo_maint_rc=0
+    _ordo_maint_out=$("$_dir/ordo-maintenance" status 2>&1) || _ordo_maint_rc=$?
+    case "$_ordo_maint_rc" in
+        0) ok "维护任务完整（快照 + 每月 scrub）" ;;
+        1) bad "维护任务缺件（定时快照/scrub 不会执行）"
+           printf '%s\n' "$_ordo_maint_out" | grep -E '✘' | head -4 | sed 's/^/    /' ;;
+        *) skip "维护任务无法判定（ordo-maintenance status 返回 ${_ordo_maint_rc}；不是通过）" ;;
+    esac
+    unset _ordo_maint_rc _ordo_maint_out
+else
+    skip "找不到 ordo-maintenance，无法检查维护 cron（不是通过）"
+fi
+
+# 13.11) wezterm 配置（D2-5 / C3）—— 旧镜像把它软链到 root 只读的 /opt，
+#        Noctalia 的配色模板每次登录 touch 失败。副本必须桌面用户可写。
+_ordo_wz_home=""
+if [ -n "${HOME:-}" ] && { [ -f "${HOME}/.config/wezterm/wezterm.lua" ] || [ -L "${HOME}/.config/wezterm/wezterm.lua" ]; }; then
+    _ordo_wz_home="$HOME"
+else
+    _ordo_wz_n=0
+    for _ordo_wz_d in /home/*; do
+        { [ -f "${_ordo_wz_d}/.config/wezterm/wezterm.lua" ] || [ -L "${_ordo_wz_d}/.config/wezterm/wezterm.lua" ]; } || continue
+        _ordo_wz_n=$((_ordo_wz_n + 1))
+        _ordo_wz_home="$_ordo_wz_d"
+    done
+    [ "$_ordo_wz_n" -eq 1 ] || _ordo_wz_home=""
+    unset _ordo_wz_d _ordo_wz_n
+fi
+if [ -z "$_ordo_wz_home" ]; then
+    skip "定位不到桌面用户的 wezterm.lua，无法验收属主（不是通过）"
+else
+    _ordo_wz="$_ordo_wz_home/.config/wezterm/wezterm.lua"
+    if [ -L "$_ordo_wz" ]; then
+        bad "wezterm.lua 仍是软链（旧镜像）：Noctalia 配色模板会报权限不够"
+        bad "  修复：退出重新登录（会话入口自动落副本）或 ordo config apply desktop"
+    elif [ "$(id -u 2>/dev/null || :)" != 0 ]; then
+        if [ -w "$_ordo_wz" ]; then
+            ok "wezterm.lua 是用户可写的真实副本"
+        else
+            bad "wezterm.lua 不可写（Noctalia 配色模板会失败）"
+            bad "  修复：sudo chown $(id -un 2>/dev/null || echo ordo) ${_ordo_wz}"
+        fi
+    else
+        _ordo_wz_perm=$(ls -ldn "$_ordo_wz" 2>/dev/null | awk '{ print $1 }')
+        _ordo_wz_uid=$(ls -ldn "$_ordo_wz" 2>/dev/null | awk '{ print $3 }')
+        _ordo_wz_home_uid=$(ls -ldn "$_ordo_wz_home" 2>/dev/null | awk '{ print $3 }')
+        case "$_ordo_wz_perm" in
+            -rw*)
+                if [ -n "$_ordo_wz_uid" ] && [ "$_ordo_wz_uid" = "$_ordo_wz_home_uid" ]; then
+                    ok "wezterm.lua 是桌面用户可写的真实副本"
+                else
+                    bad "wezterm.lua 属主不是桌面用户（${_ordo_wz}）"
+                fi ;;
+            *) bad "wezterm.lua 属主无写位（${_ordo_wz_perm:-读不到}）" ;;
+        esac
+        unset _ordo_wz_perm _ordo_wz_uid _ordo_wz_home_uid
+    fi
+    unset _ordo_wz
+fi
+unset _ordo_wz_home
+
 # 16) 空闲挂起禁用 —— VM/无人值守场景的硬性要求
 #     【2026-11-20 事故】powerdevil 空闲挂起把 VM 挂起后，aarch64 QEMU virt
 #     机器的 QMP system_wakeup 报 "wake-up from suspend is not supported"，

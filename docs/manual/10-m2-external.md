@@ -76,7 +76,60 @@ python3 dev/m2/prepare.py --base /Volumes/ORDOPAYLOAD/live/initramfs-live.img --
 
 关机并保持外接盘连接。长按电源键，选择 Ordo Linux，等到 Live 提示符后输入 `ordo-install`。核对盘的信息，按屏幕提示输入带四位后缀的确认码。看到外接盘已写入且池已导出的消息后，输入 `poweroff`。再次选择 Ordo Linux。
 
-第一次启动由 greetd 自动以普通用户 `ordo` 启动 Umbriel 和 Noctalia。退出或以后启动时显示登录界面。若屏幕没有进入桌面，可用第二个虚拟终端检查 `rc-service greetd status`。真机屏幕、键盘和合盖唤醒需要在 Mac 上分别验收。
+第一次启动由 greetd 自动以普通用户 `ordo` 启动 Umbriel 和 Noctalia。退出或以后启动时显示登录界面。若屏幕没有进入桌面，可用第二个虚拟终端检查 `rc-service greetd status`。真机屏幕、键盘和合盖唤醒需要在 Mac 上分别验收；合盖行为见下面的「合盖、睡眠与唤醒」。
+
+## 合盖、睡眠与唤醒
+
+外接盘安装默认**不进入睡眠**。`/etc/elogind/logind.conf.d/10-ordo-external-root.conf` 把合盖（电池/外接电源）、睡眠键和休眠键都设为 `ignore`。原因有两层：唤醒时 USB 控制器会重新枚举，根池掉线会让桌面卡在根文件系统 I/O 上，只能长按断电；同时 swap 只有 4G 且和根池在同一块外接盘上，不足以休眠 8G 内存。
+
+- 不要执行 `loginctl suspend`、`loginctl hibernate` 或 `echo mem > /sys/power/state`。需要省电时直接关机。
+- 确认策略真的生效（真机执行）：
+
+  ```sh
+  busctl get-property org.freedesktop.login1 /org/freedesktop/login1 \
+      org.freedesktop.login1.Manager HandleLidSwitch   # 期望 s "ignore"
+  ls -l /lib/elogind/system-sleep/50-ordo-root-pool.sh  # 期望可执行
+  # 不要执行 loginctl suspend：Handle* 只拦合盖/电源键，D-Bus 的 Suspend 仍会真的挂起
+  ```
+- 如果机器还是进入了睡眠（旧镜像、手动命令或固件行为），唤醒后先在桌面终端运行：
+
+  ```sh
+  ordo-m2-hardware --resume
+  ```
+
+  它跳过 EGL/GPU 检查，只复检无线网卡、扬声器保护/音频路由、内置键盘和触控板三项。任一项“异常”时按输出里的原因排查；三项全通过也不代表根池没受伤，继续看下一节。
+
+## 外接盘掉线（pool suspended）
+
+症状：桌面突然卡住、终端命令不返回、小组件停在最后一帧。根文件系统在 USB 盘上，线被碰掉或供电瞬断后，ZFS 默认的 `failmode=wait` 会无限等待，所以屏幕上不会自己出现错误。
+
+1. **先不要长按断电。** 检查 USB 线/接口，重新插紧；如果是供电问题，换到有独立供电的接口或集线器。
+2. 池回来后，ZFS 通常会自动恢复并重放；不能自动恢复时，在文本终端（`Ctrl+Alt+F2`）运行：
+
+   ```sh
+   zpool status -x rpool
+   zpool clear rpool
+   ```
+
+   `zpool clear` 会清掉错误并让 suspended 的池尝试恢复。看到 `pool 'rpool' is healthy` 后再继续使用。
+3. 掉盘事件会被 `/etc/zfs/zed.d/statechange-ordo.sh` 记到 `/run/ordo/root-pool-failed`，并用 `wall` 和桌面 critical 通知播报。每次登录时 `ordo-m2-hardware --session-report` 也会读这个标记、再次弹出通知并把硬件自检判为异常。池恢复 ONLINE 后这个标记会自动删除；不要用删标记代替修池。
+4. 池无法恢复（`FAULTED`/`UNAVAIL`，或盘已经物理损坏）时：长按电源键关机，保持盘连接，从 ZFSBootMenu 选择可用的系统环境；如果 ZBM 也起不来，用**另一块**救援 U 盘启动手动 Live，按[升级与回滚手册](06-upgrade-rollback.md)导入池并导出数据。
+5. **必须保留一块独立的救援 U 盘。** ZFSBootMenu、手动 Live 入口和系统根池都在同一块外接盘上；这块盘掉线时，它们会一起不可用。救援盘不要放 `rpool`，也不要在故障时反复插拔写盘。
+
+## USB 健康与数据保密
+
+- **TRIM**：安装器会尝试 `zpool set autotrim=on rpool`。有些 USB-SATA/UAS 桥不支持 TRIM，此时会改为每月 1 日 03:17 的 `/etc/cron.d/ordo-trim` 兜底。核对：
+
+  ```sh
+  zpool get autotrim rpool
+  cat /etc/cron.d/ordo-trim 2>/dev/null
+  doas zpool trim rpool   # 手工确认桥是否真的接受 TRIM；失败会进日志
+  ```
+
+  输出 `autotrim  on` 或存在月检 cron 都算策略落地；两者都没有时看安装日志里的 `tune-usb-pool.sh` 警告。
+- **swap 写入**：swap zvol 使用 `sync=standard`，不是 `sync=always`。代价是断电可能丢最近的交换页（应用可重算的匿名页），换来的是 USB 盘寿命和系统响应；这不是休眠支持，本机仍然不能休眠。
+- **威胁模型**：根池与 `/home` 在外接盘上是**明文**的。盘丢失/被拿走/被长期接触，等于项目、文档、密钥环与浏览器数据全部泄露。安装器不提供全盘加密；需要保护时，把备份流发到加密的数据集或加密容器，并把盘放在物理可控的地方。加密备份是可选层，不是默认保证。
+- 外接盘长期插着时，保留散热空间并避免劣质集线器；掉盘的第一嫌疑通常不是 ZFS，而是供电和线材。
 
 ## 升级与回滚
 
@@ -100,6 +153,13 @@ bootefi ${kernel_addr_r}
 
 ## 在桌面上核对 M2 加速
 
-进入 Umbriel 后，最近一次硬件检查保存在 `~/.local/state/ordo/m2-hardware.log`。它会核对合成器选中的渲染设备、Wayland 会话实际使用的 Mesa 驱动、内屏、输入设备、无线控制器和声音保护服务。摄像头默认只查询格式，报告会保留“待验”。需要验证摄像头时，在桌面终端运行 `ordo-m2-hardware --capture-camera`。它读取三帧后丢弃。
+进入 Umbriel 后，最近一次硬件检查保存在 `~/.local/state/ordo/m2-hardware.log`。它会核对合成器选中的渲染设备、Wayland 会话实际使用的 Mesa 驱动、内屏、输入设备、无线控制器、声音保护服务、屏幕背光设备、电池状态和桌面小组件输出。摄像头不在例行检查内：`apple-isp` 还没有进入平台模块列表，目前**未支持**；`ordo-m2-hardware --capture-camera` 只保留给开发和硬件验收（先装 `media-tv/v4l-utils` 才有 `v4l2-ctl`），读到帧也不改变例行结论。
 
-如果 fastfetch 显示 `llvmpipe`，这次检测走的是 CPU 软件渲染。打开报告查看“Umbriel 会话和 Mesa Wayland EGL 使用 AGX”一项。内屏静置时是否闪烁、无线网络能否连接、蓝牙设备能否配对，以及休眠后能否回到桌面，都需要在这台 Mac 上实际操作确认。
+唤醒后只需要复检无线、音频和输入三项时，运行 `ordo-m2-hardware --resume`，不要用完整检查代替。
+
+- **扬声器保护常驻**：`rc-service speakersafetyd status` 应为 started；手动 `kill` 一次该进程后，5 秒内应被 OpenRC 重新拉起（`supervise-daemon`）。没有重新拉起说明上游 init 脚本正在自行 daemonize，需按该版本 init 脚本调整 `/etc/conf.d/speakersafetyd`。保护缺失时 `/run/ordo/speaker-protection-missing` 会写明原因。
+- **屏幕亮度**：例行检查里的“屏幕背光设备可用于亮度调节”要求 `/sys/class/backlight` 至少有一个 `max_brightness > 0` 的设备。Fn 亮度键调用 `noctalia msg brightness-up/down`，不依赖 `brightnessctl`。这一项报异常时，先确认内屏确实绑定在 Apple DRM 上，再看 `/sys/class/backlight`。
+- **桌面小组件输出**：Noctalia 配置里每个 `output = "..."` 必须对应一个已连接（`connected`）的 DRM 连接器；M2 内屏是 `eDP-1`，写死 `Virtual-1`（虚拟机）会让组件不显示或错位。想跟随合成器默认输出时，直接省略该 widget 的 `output` 键。检查不通过时报告会列出未连接的输出名。
+- **掉盘标记**：报告会先读 `/run/ordo/root-pool-failed`；标记存在时即使例行硬件项全绿也会判为异常并弹 critical 通知。这是有意的——掉盘不是硬件自检能“修好”的问题。
+
+如果 fastfetch 显示 `llvmpipe`，这次检测走的是 CPU 软件渲染。打开报告查看“Umbriel 会话和 Mesa Wayland EGL 使用 AGX”一项。内屏静置时是否闪烁、无线网络能否连接、蓝牙设备能否配对，以及唤醒后能否回到桌面，都需要在这台 Mac 上实际操作确认。

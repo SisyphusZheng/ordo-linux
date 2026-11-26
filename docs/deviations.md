@@ -185,3 +185,19 @@ xwayland-satellite/yazi 的条目已随包一起失效。
 「新建密钥环/输入密钥环密码」对话框。greetd `[initial_session]` 首启自动登录
 没有 PAM 密码，login keyring 不会被自动创建/解锁；该会话首次使用密钥时可能
 提示一次，正常登录不受影响。
+
+## 十二、M2 外接盘日用修复（2026-11-26）
+
+本节对应 `.local/audit/2026-11-26-daily-use.md` 的 D0-2/D0-3/D2-1/D2-2/D3-4，
+编号独立（#66–#71）。
+
+| # | 偏离 | 原因 | 收回条件 / 状态 |
+|---|---|---|---|
+| 66 | 外接 USB 根池禁用合盖/睡眠/休眠 | 唤醒时 USB 重新枚举会让根池 suspend，整机卡在根 I/O；swap 仅 4G 且与根池同盘，不足以休眠 8G 内存。只在根池非 NVMe 时落 `HandleLidSwitch=ignore` 等四项；内置 NVMe 根保留 elogind 默认 | 不收回（外接盘路径的物理约束）。收回条件：根池迁到内置盘，或换到可稳定唤醒的接口/供电。唤醒后人工运行 `ordo-m2-hardware --resume` |
+| 67 | 外接盘 swap zvol `sync=standard`（原 `sync=always`） | `always` 把每次换出都同步刷到 USB，拖慢系统并持续磨损盘。断电最多丢最近交换页，匿名页可由应用重算 | 不收回。若出现「断电后交换页损坏导致应用崩溃」的实测，再评估 `always` |
+| 68 | USB 桥不支持 TRIM 时用月检 cron 兜底 | `zpool create -o autotrim=on` 在能力位不报告的桥上会让整次安装失败；建池后 `zpool set autotrim=on` 失败只降级：落 `/etc/cron.d/ordo-trim` 每月 1 日 03:17 执行 `zpool trim` | 运行时能力检查：`zpool get autotrim rpool` 为 on 或 cron 存在。TRIM 是否真的被桥接受只能在真机上 `zpool trim` 验证 |
+| 69 | 内置摄像头列为「未支持」并从例行九项摘出 | `apple-isp` 不在 `config/platform/m2/platform-modules`，也没有打包；加 `media-tv/v4l-utils` 只会让例行检查恒红，把真异常和未支持混为一谈。`--capture-camera` 保留给硬件验收 | 上游 apple-isp 进入平台模块与 world 后收回，并恢复例行检查 |
+| 70 | 不启用 `power-profiles-daemon`（电源档位无后端） | ppd 的 M2 后端不提供可用档位，旧实现只在 `world.usb` 声明、日常 `m2-native` 路径没有服务，登录必报 `power profiles refresh failed`。移除声明与服务启用，避免假装有档位。Noctalia 没有文档化的“隐藏档位”配置键，本轮不猜键名（猜错会让整份 TOML 解析失败）；档位面板在无 D-Bus 后端时按上游行为降级 | Apple Silicon 平台有可用的 ppd 后端并被 Gentoo/上游支持后收回 |
+| 71 | 外接盘根池与 `/home` 为明文，全盘加密不提供 | 安装器只做 `zpool create`，没有加密根方案；USB 盘可丢失/被拿走，威胁模型按「盘离开手即全部泄露」处理 | 引入加密根或加密 home 数据集时收回。缓解：备份流发到加密目标（可选项，不是默认保证），并保留独立救援盘 |
+| 72 | 不支持打印与扫描 | CUPS 与 SANE 不在系统层；Flatpak 应用没有打印后端，硬塞进 world 会增加常驻服务与驱动面 | 需要时先立项，按 core 层接入 CUPS/SANE 并加 doctor 判据 |
+威胁模型边界（#71）：本系统防的是「盘还在、人不在」之外的**在线**误操作（快照、回滚、校验、掉盘播报），不防物理接触。拿到盘的人可以读取全部数据；没有远程擦除，也没有 TPM 绑定的密钥。备份若不加密，同样按明文泄露处理。

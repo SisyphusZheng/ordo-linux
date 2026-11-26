@@ -30,8 +30,10 @@ $PROG $VERSION — ZFS 原生、可回滚、Flatpak 优先的 Gentoo 桌面系�
   backup <动作>            备份管理：send/list/verify/status（zfs send 到池外）
   config <动作>            统一配置入口（ADR 0008）：show/verify/apply/diff/path
   migrate [--pending]     运行 config/migrations 中尚未执行的迁移
-  app install <id>        安装 Flatpak 应用（等价 flatpak install flathub <id>）
-  app list                已安装的 Flatpak 应用
+  selfupdate              更新 /opt/ordo（发布 tarball，校验后原子替换）
+  app install <id>        安装 Flatpak 应用（自动补齐用户级 flathub remote）
+  app list                已安装的 Flatpak 应用（空时会给出下一步）
+  ssh on|off|status       开关 SSH 登录入口（幂等）
   doctor                  检查系统漂移（配置/快照/服务）
   selfcheck               自检：usage 表 × case 分发 × 安装软链 三者是否一致
   info                    版本与环境信息
@@ -50,6 +52,101 @@ _dispatch() {
         exit "$ORDO_EXIT_BAD"
     fi
     exec "$_target" "$@"
+}
+
+# ---------------------------------------------------------------------------
+# SSH 入口（A8）：装机后不查 OpenRC 文档也能开/关远程登录，重复执行结果一致。
+# 只在 drop-in 里写策略，sshd_config 本体只追加一行 Include（幂等）。
+# 路径可用环境变量覆盖，便于用例在临时目录里跑完整行为。
+# ---------------------------------------------------------------------------
+SSH_CONF="${ORDO_SSH_CONFIG:-/etc/ssh/sshd_config}"
+SSH_DROPIN_DIR="${ORDO_SSH_DROPIN_DIR:-/etc/ssh/sshd_config.d}"
+SSH_DROPIN="$SSH_DROPIN_DIR/10-ordo.conf"
+
+cmd_ssh() {
+    _sub="${1:-status}"
+    case "$_sub" in
+        on)
+            require_root "$PROG ssh on"
+            command -v rc-update >/dev/null 2>&1 \
+                || ordo_die "找不到 rc-update（本系统用 OpenRC；没有它无法注册 sshd）"
+            [ -f "$SSH_CONF" ] \
+                || ordo_die "缺少 ${SSH_CONF}：net-misc/openssh 未安装（emerge net-misc/openssh）"
+            mkdir -p "$SSH_DROPIN_DIR"
+            cat > "$SSH_DROPIN" <<'SSHD'
+# Ordo — SSH 的最小策略（由 `ordo ssh on` 写入；重复执行内容不变）
+# root 口令在安装期已锁定，这里再关掉 root 直登作为第二道锁。
+PermitRootLogin no
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+SSHD
+            chmod 644 "$SSH_DROPIN"
+            # OpenSSH 8.2+ 才认 Include；sshd_config 缺这一行时 drop-in 不会生效，
+            # 而「加进去了却没生效」比直接报错更难查。
+            _inc="Include $SSH_DROPIN_DIR/*.conf"
+            # OpenSSH 的「first obtained value wins」：Include 必须在文件**开头**，
+            # 追加到末尾时，前面已有的 PermitRootLogin yes 会压住 drop-in 的 no。
+            if ! grep -Fqx "$_inc" "$SSH_CONF"; then
+                _tmpc="${SSH_CONF}.ordo.$$"
+                {
+                    printf '# Ordo — 允许 drop-in 配置（`ordo ssh on` 置于首部，幂等）\n%s\n' "$_inc"
+                    cat "$SSH_CONF"
+                } >"$_tmpc" && mv -f "$_tmpc" "$SSH_CONF" \
+                    || ordo_die "无法把 Include 写入 ${SSH_CONF}（检查权限）"
+            fi
+            # 宿主机密钥在镜像里被清掉（克隆镜像不能共用身份）；sshd -t 在没有任何
+            # 主机密钥时会直接失败，所以必须先 ssh-keygen -A 再校验（否则首启必失败）。
+            install -d -m 0755 /run/sshd 2>/dev/null || :
+            ssh-keygen -A >/dev/null 2>&1 || true
+            sshd -t -f "$SSH_CONF" 2>/dev/null \
+                || ordo_die "sshd 配置校验失败（sshd -t -f ${SSH_CONF}）：先修语法再启用"
+            rc-update add sshd default >/dev/null 2>&1 \
+                || ordo_die "rc-update add sshd default 失败"
+            if ! rc-service sshd start >/dev/null 2>&1; then
+                rc-service sshd restart >/dev/null 2>&1 \
+                    || ordo_die "sshd 已注册但未能启动（rc-service sshd start 看原因）：SSH 并未开启"
+            fi
+            ordo_ok "SSH 已开启（default runlevel；策略见 ${SSH_DROPIN}）"
+            ;;
+        off)
+            require_root "$PROG ssh off"
+            if command -v rc-update >/dev/null 2>&1; then
+                rc-update del sshd default >/dev/null 2>&1 || true
+            else
+                ordo_warn "找不到 rc-update，无法确认 sshd 是否已移出 runlevel"
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                rc-service sshd stop >/dev/null 2>&1 || true
+            fi
+            rm -f "$SSH_DROPIN"
+            ordo_ok "SSH 已关闭（sshd 不在 default runlevel，Ordo 的 drop-in 已移除）"
+            ;;
+        status)
+            _enabled=unknown
+            _running=unknown
+            if command -v rc-update >/dev/null 2>&1; then
+                if rc-update show default 2>/dev/null | grep -q '^[[:space:]]*sshd'; then
+                    _enabled=yes
+                else
+                    _enabled=no
+                fi
+            fi
+            if command -v rc-service >/dev/null 2>&1; then
+                if rc-service sshd status 2>/dev/null | grep -q started; then
+                    _running=yes
+                else
+                    _running=no
+                fi
+            fi
+            printf 'sshd runlevel: %s\n' "$_enabled"
+            printf 'sshd running:  %s\n' "$_running"
+            [ -f "$SSH_DROPIN" ] && printf '策略文件:     %s\n' "$SSH_DROPIN"
+            case "$_enabled$_running" in
+                *unknown*) exit "$ORDO_EXIT_UNKNOWN" ;;
+            esac
+            ;;
+        *) usage >&2; exit "$ORDO_EXIT_BAD" ;;
+    esac
 }
 
 cmd="${1:-}"; [ $# -gt 0 ] && shift || true
@@ -73,18 +170,41 @@ case "$cmd" in
             install)
                 command -v flatpak >/dev/null 2>&1 \
                     || ordo_die "flatpak 未安装（sys-apps/flatpak 应由 config/world 提供）"
+                # 参数错误不该先被网络错误掩盖：先拒绝空参数，再碰 remote。
+                [ "$#" -gt 0 ] || {
+                    printf '用法：%s app install <应用 id> [...]\n' "$PROG" >&2
+                    printf '可用清单：%s app list；推荐见 config/apps.d/01-optional.list\n' "$PROG" >&2
+                    exit "$ORDO_EXIT_BAD"
+                }
+                # 【D1-2】用户级 flathub remote 是 install 的前置。旧镜像只在安装期
+                # 以 ordo 身份加过一次：换用户、被 flatpak repair 清掉、或旧镜像从未
+                # 加过时，install 会以「找不到 remote」失败，而手册没写下一条命令。
+                # --if-not-exists 是幂等的；失败不能吞，否则用户又拿到同一条报错。
+                flatpak remote-add --user --if-not-exists flathub \
+                    https://flathub.org/repo/flathub.flatpakrepo \
+                    || ordo_die "无法添加用户级 flathub remote（网络不可用或 flatpak 损坏）"
                 flatpak install --user --noninteractive flathub "$@" ;;
             list)
                 command -v flatpak >/dev/null 2>&1 \
                     || ordo_die "flatpak 未安装（sys-apps/flatpak 应由 config/world 提供）"
-                flatpak list --user --app --columns=application,version ;;
+                _apps="$(flatpak list --user --app --columns=application,version)" || exit $?
+                if [ -n "$_apps" ]; then
+                    printf '%s\n' "$_apps"
+                else
+                    # 空输出不是错误，但只给一张空表等于让用户站在死路口。
+                    printf '（没有通过 ordo 安装的用户级 Flatpak 应用）\n' >&2
+                    printf '安装示例：%s app install org.mozilla.firefox\n' "$PROG" >&2
+                    printf '清单：config/apps.d/00-core.list（必装）与 01-optional.list（推荐）\n' >&2
+                fi ;;
             *) usage; exit "$ORDO_EXIT_BAD" ;;
         esac
         ;;
     snap)     _dispatch ordo-snap "$@" ;;
+    ssh)      cmd_ssh "$@" ;;
     backup)   _dispatch ordo-backup "$@" ;;
     config)   _dispatch ordo-config "$@" ;;
     migrate)  _dispatch ordo-migrate "$@" ;;
+    selfupdate) _dispatch ordo-selfupdate "$@" ;;
     doctor)   _dispatch doctor "$@" ;;
     selfcheck) _dispatch ordo-selfcheck "$@" ;;
     info)

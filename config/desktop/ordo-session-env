@@ -75,9 +75,9 @@ if [ "$WLR_RENDERER" = pixman ]; then
     export WLR_RENDERER_ALLOW_SOFTWARE="${WLR_RENDERER_ALLOW_SOFTWARE:-1}"
 fi
 
-# 输入法：GTK_IM_MODULE 必须是 wayland（走 text-input-v3）。
-# 设成 fcitx 会让 GTK 走 immodule 绕路而失败。
-export QT_IM_MODULE=fcitx
+# 输入法：GTK 与 Qt 都走合成器的 text-input-v3，不设 immodule 变量。
+# QT_IM_MODULE=fcitx 会要求已安装的 fcitx-qt 插件，而 world 刻意不装它
+# （偏离 #57）；设了只会让 Qt 应用报加载失败。GTK 显式 wayland，X11/XIM 与 SDL 仍保留显式变量。
 export GTK_IM_MODULE=wayland
 export XMODIFIERS=@im=fcitx
 export XDG_SESSION_TYPE=wayland
@@ -123,7 +123,7 @@ fi
 ordo_session_activate_environment() {
     [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || return 0
     command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
-    _ordo_ae="XDG_RUNTIME_DIR XDG_SESSION_TYPE QT_IM_MODULE GTK_IM_MODULE XMODIFIERS"
+    _ordo_ae="XDG_RUNTIME_DIR XDG_SESSION_TYPE GTK_IM_MODULE XMODIFIERS"
     [ -n "${XDG_CURRENT_DESKTOP:-}" ] && _ordo_ae="$_ordo_ae XDG_CURRENT_DESKTOP"
     [ -n "${GNOME_KEYRING_CONTROL:-}" ] && _ordo_ae="$_ordo_ae GNOME_KEYRING_CONTROL"
     [ -n "${WAYLAND_DISPLAY:-}" ] && _ordo_ae="$_ordo_ae WAYLAND_DISPLAY"

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Ordo 密钥服务策略：Secret Service 已回归（2026-11-26 收回旧偏离）。
 #
-# check 验证「服务确实被声明与接线」，三态：0 齐备 | 1 缺件 | 2 无法判定。
+# check 验证「服务确实被声明与接线」，有会话总线时再做一次 secret-tool 往返；
+# 三态：0 齐备 | 1 缺件 | 2 无法判定。
 # configure 只做幂等声明收敛；remove 保留为空操作，兼容旧镜像的调用点。
 set -eu
 here=$(dirname "$(readlink -f "$0")")
@@ -65,6 +66,25 @@ check() {
     elif ! grep -Fq 'GNOME_KEYRING_CONTROL' "$_session"; then
         printf '会话脚本缺少 GNOME_KEYRING_CONTROL 去重判据（%s）\n' "$_session" >&2
         _missing=1
+    fi
+
+    # 5) 运行时往返：声明与接线都对，服务仍可能没起/没解锁。
+    #    没有 secret-tool 或会话总线时保持静态结论（doctor 会另报无法判定）。
+    if command -v secret-tool >/dev/null 2>&1 && [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+        _probe="ordo-keyring-policy-$$"
+        if printf '%s' "$_probe" | secret-tool store --label='Ordo keyring policy probe' \
+               service ordo-keyring-policy probe "$$" >/dev/null 2>&1; then
+            _got=$(secret-tool lookup service ordo-keyring-policy probe "$$" 2>/dev/null || true)
+            secret-tool clear service ordo-keyring-policy probe "$$" >/dev/null 2>&1 || true
+            if [ "$_got" != "$_probe" ]; then
+                printf 'Secret Service 运行时往返失败：lookup 结果与写入不一致（login keyring 未解锁？）\n' >&2
+                _missing=1
+            fi
+        else
+            printf 'Secret Service 运行时往返失败：secret-tool store 失败（服务未启动？）\n' >&2
+            _missing=1
+        fi
+        unset _probe _got
     fi
 
     [ "$_missing" -eq 0 ] || return 1

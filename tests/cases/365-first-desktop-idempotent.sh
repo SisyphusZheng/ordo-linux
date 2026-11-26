@@ -23,6 +23,7 @@ mkdir -p "$scratch/bin" \
     "$scratch/usr/bin" "$scratch/usr/local/bin" "$scratch/usr/local/sbin" \
     "$scratch/etc/greetd" "$scratch/etc/init.d" "$scratch/etc/runlevels/default" \
     "$scratch/etc/ordo" "$scratch/etc/local.d" \
+    "$scratch/etc/NetworkManager/dispatcher.d" \
     "$scratch/home/ordo/.config/umbriel" "$scratch/home/ordo/.config/noctalia" \
     "$scratch/var/lib/ordo" "$scratch/usr/share/backgrounds"
 
@@ -88,6 +89,7 @@ sed -e "s|/opt/ordo|$scratch/opt/ordo|g" \
     -e "s|/etc/init.d|$scratch/etc/init.d|g" \
     -e "s|/etc/runlevels|$scratch/etc/runlevels|g" \
     -e "s|/etc/local.d|$scratch/etc/local.d|g" \
+    -e "s|/etc/NetworkManager|$scratch/etc/NetworkManager|g" \
     -e "s|/etc/ordo|$scratch/etc/ordo|g" \
     -e "s|/home/ordo|$scratch/home/ordo|g" \
     -e "s|/home/.ordo|$scratch/home/.ordo|g" \

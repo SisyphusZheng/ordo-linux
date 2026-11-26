@@ -25,8 +25,8 @@ media-libs/alsa-lib           -systemd
 #   -systemd：音频栈的 systemd 集成（我们不用）
 
 # ---- 电源（笔记本） ----
-sys-power/upower              elogind
-#   elogind：电池事件走 elogind（无 systemd）
+# upower 的 USE 已在 config/package.use/desktop 统一声明（所有平台同一口径），
+# 这里不再重复：真机分支（install.sh bare-metal）会连同 desktop 一起拷贝。
 
 # ---- 微码（安全） ----
 # 「装哪个微码包」属于声明层，已按架构分片：

@@ -4,7 +4,7 @@ set -eu
 scripts=/opt/ordo/scripts
 bin=/usr/local/bin
 mkdir -p "$bin"
-set -- ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck ordo-doctor ordo-wifi
+set -- ordo sysup ordo-snap ordo-snap-auto ordo-backup ordo-config ordo-migrate ordo-selfcheck ordo-doctor ordo-wifi ordo-maintenance ordo-selfupdate
 
 for command do
     entry=$command

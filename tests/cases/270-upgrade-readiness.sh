@@ -9,8 +9,19 @@ mkdir "$tmp/bin" "$tmp/scripts" "$tmp/conf" "$tmp/boot"
 # Redirect /boot in the script under test. All state-changing tools are fixtures.
 sed 's|/boot/|boot/|g' "$ROOT/scripts/sysup" > "$tmp/scripts/sysup"
 cp "$ROOT/scripts/lib.sh" "$tmp/scripts/"
-printf '#!/bin/sh\nexit "${MIGRATION_RC:-0}"\n' > "$tmp/scripts/ordo-migrate"
+cat > "$tmp/scripts/ordo-migrate" <<'MIGRATE'
+#!/bin/sh
+printf 'ordo-migrate %s\n' "$*" >> "$COMMAND_LOG"
+exit "${MIGRATION_RC:-0}"
+MIGRATE
 chmod +x "$tmp/scripts/ordo-migrate"
+# 自更新是 sysup 的迁移前步骤：夹具必须提供它，否则测不到真实顺序。
+cat > "$tmp/scripts/ordo-selfupdate" <<'SELFUPDATE'
+#!/bin/sh
+printf 'ordo-selfupdate %s\n' "$*" >> "$COMMAND_LOG"
+exit "${SELFUPDATE_RC:-0}"
+SELFUPDATE
+chmod +x "$tmp/scripts/ordo-selfupdate"
 cat > "$tmp/conf/check-build" <<'BUILD'
 case "$1" in jobs) exec sh "$BUILD_POLICY" "$@";; arc) exit "${ARC_RC:-0}";; esac
 BUILD
@@ -88,5 +99,24 @@ out=$(upgrade)
 assert_rc "$?" 0 "升级成功"
 assert_contains "$(cat "$COMMAND_LOG")" "modinfo -k 6.10" "检查新内核的 ZFS 模块"
 assert_contains "$(cat "$COMMAND_LOG")" "zfs release" "释放快照 hold"
+
+case_name "自更新先于迁移，失败时中止且不跑迁移"
+
+: > "$COMMAND_LOG"
+out=$(SELFUPDATE_RC=2 upgrade)
+assert_rc "$?" 0 "没有更新源（退出码 2）只告警，升级继续"
+assert_contains "$(cat "$COMMAND_LOG")" "ordo-selfupdate" "调用了自更新"
+assert_contains "$(cat "$COMMAND_LOG")" "ordo-migrate" "没有更新源时迁移照常执行"
+_su_line=$(grep -n '^ordo-selfupdate' "$COMMAND_LOG" | head -1 | cut -d: -f1)
+_mig_line=$(grep -n '^ordo-migrate' "$COMMAND_LOG" | head -1 | cut -d: -f1)
+assert_rc "$([ -n "$_su_line" ] && [ -n "$_mig_line" ] && [ "$_su_line" -lt "$_mig_line" ] && echo 0 || echo 1)" 0 \
+    "自更新在迁移之前"
+
+: > "$COMMAND_LOG"
+out=$(SELFUPDATE_RC=1 upgrade)
+assert_rc "$?" 1 "自更新失败时升级中止"
+assert_contains "$out" "自更新失败" "点名自更新失败"
+assert_not_contains "$(cat "$COMMAND_LOG")" "ordo-migrate" "自更新失败时不跑迁移"
+assert_not_contains "$(cat "$COMMAND_LOG")" "zfs release" "保留快照 hold"
 
 finish

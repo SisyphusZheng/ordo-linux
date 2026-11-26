@@ -57,7 +57,7 @@ media-video/pipewire
 media-video/wireplumber
 # ---- 桌面功能组件 ----
 # 媒体键落地工具（umbriel XF86AudioPlay/Next/Prev 绑定调用）。
-# 亮度走 noctalia msg brightness-*，无需 brightnessctl。
+# 亮度走 noctalia msg brightness-*（不装 brightnessctl）；真机若无背光设备，由 verify-hardware.sh 的背光项报出。
 media-sound/playerctl
 gui-apps/wl-clipboard
 gui-apps/grim
@@ -107,6 +107,13 @@ app-misc/tmux
 
 # ---- 系统服务 ----
 sys-process/cronie
+# 系统日志：没有 messages 时，睡眠/掉盘/扬声器这类故障没有任何现场。
+# 日志轮转与 syslog 同批声明，否则 messages 会无限增长。
+app-admin/sysklogd
+app-admin/logrotate
+# 电源事件：Noctalia 面板由 UPower 提供电池与充电状态（所有平台通用，
+# 不再是 M2 专属——通用路径曾经缺它，电源档位每次登录失败）。
+sys-power/upower
 
 # ---- 引导/文件系统工具 ----
 sys-boot/efibootmgr

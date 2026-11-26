@@ -56,7 +56,7 @@ with tempfile.TemporaryDirectory(prefix='m2-speaker-') as raw:
     compatible.write_bytes(b'apple,j413\0apple,t8112\0')
     assert start(LATE_ALSA='1').returncode == 0 and ready.is_dir() and polls.read_text() == 'x'
     assert start().returncode == 0 and not polls.exists(), 'A ready card does not delay boot'
-    assert start(DENY_AUDIO='1').returncode == 1 and len(polls.read_text()) == 25
+    assert start(DENY_AUDIO='1').returncode == 1 and len(polls.read_text()) == 100
     sense.unlink()
-    assert start().returncode == 1 and len(polls.read_text()) == 25
+    assert start().returncode == 1 and len(polls.read_text()) == 100
 PY

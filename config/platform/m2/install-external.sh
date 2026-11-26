@@ -208,9 +208,12 @@ zfs set org.zfsbootmenu:active=on "$ROOTDS"
 # /home 用正常 mountpoint，交给 zfs-mount 自动挂，不写进 fstab
 zfs create -o mountpoint=/home -o canmount=noauto "$HOMEDS"
 # swap zvol（M2 Air 无 swap 风险高）
-# 512e 盘上 512 的 volblocksize 元数据开销大且慢，写死 4K
+# 512e 盘上 512 的 volblocksize 元数据开销大且慢，写死 4K。
+# sync=standard 而不是 always（D3-4）：swap 是 USB 盘上最热的写入源，
+# always 会把每页换出都变成同步刷盘，既拖慢系统又持续磨损盘。断电最多丢
+# 最近的交换页，换回的匿名页可由应用重算——相对于根数据是可接受的代价。
 zfs create -V 4G -b 4096 \
-    -o compression=zle -o logbias=throughput -o sync=always \
+    -o compression=zle -o logbias=throughput -o sync=standard \
     -o primarycache=metadata -o secondarycache=none \
     -o com.sun:auto-snapshot=false "$POOL/swap"
 # 交换区需要签名；实测缺 mkswap 时首启 swapon 失败（读交换区头失败）
@@ -360,6 +363,40 @@ EOF
 echo ordo > "$TARGET/etc/hostname"
 [ -f "$TARGET/etc/conf.d/hostname" ] && sed -i 's/^hostname=.*/hostname="ordo"/' "$TARGET/etc/conf.d/hostname" || true
 
+# 系统日志（诊断前置）：rootfs 是预构建 tarball，读不到仓库里新增的声明文件，
+# 所以配置文本在这里内联生成。文本与 install.sh §7a 保持一致，用例 376 断言。
+mkdir -p "$TARGET/etc/logrotate.d"
+cat > "$TARGET/etc/syslog.conf" <<'SYSLOG'
+# Ordo — syslog 定义（install.sh §7a 与 M2 安装器同文）
+# 全部 facility 收进一个文件：诊断要按时间顺序看现场，拆文件拼不回时间线。
+*.*                                             /var/log/messages
+SYSLOG
+chmod 644 "$TARGET/etc/syslog.conf"
+cat > "$TARGET/etc/logrotate.d/ordo" <<'LOGROTATE'
+# Ordo — syslog 轮转。缺这一条时 messages 会一直长到吃满外置系统盘。
+/var/log/messages {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    postrotate
+        /etc/init.d/sysklogd reload >/dev/null 2>&1 || true
+    endscript
+}
+LOGROTATE
+chmod 644 "$TARGET/etc/logrotate.d/ordo"
+# rc_logger：没有它时服务启动顺序只能靠猜。
+if [ -f "$TARGET/etc/rc.conf" ]; then
+    if grep -qE '^[#[:space:]]*rc_logger=' "$TARGET/etc/rc.conf"; then
+        sed -i -E 's|^[#[:space:]]*rc_logger=.*|rc_logger="YES"|' "$TARGET/etc/rc.conf"
+    else
+        printf '\nrc_logger="YES"\n' >> "$TARGET/etc/rc.conf"
+    fi
+else
+    warn "目标系统缺少 /etc/rc.conf —— 跳过 rc_logger"
+fi
+
 # 真机 runlevels 校准
 mkdir -p "$TARGET/opt/ordo"
 tar -xzf "$BOOT_MOUNT/desktop-@BUNDLE_SHA@.tar.gz" -C "$TARGET/opt/ordo"
@@ -393,6 +430,27 @@ link_vendorfw() {
     done < "$_map"
 }
 link_vendorfw
+
+# USB 根池健康（D3-4）：autotrim 能开就开；桥不支持时落月检 TRIM cron，
+# 不让整个安装因为一个 TRIM 能力位失败。
+sh "$TARGET/opt/ordo/config/platform/m2/tune-usb-pool.sh" "$POOL" "$TARGET" || \
+    warn "USB 盘 TRIM 策略未完全落地（autotrim 与月检 cron 都失败），请检查 USB 桥能力"
+
+# 掉盘播报（D0-3）：zed 已经在运行，但仓库此前没有任何 zed.d 处理器。
+install -Dm755 "$TARGET/opt/ordo/config/platform/m2/zed.d/statechange-ordo.sh" \
+    "$TARGET/etc/zfs/zed.d/statechange-ordo.sh"
+# 睡眠策略（D0-2）：只在根池不是内置 NVMe 时禁用合盖/睡眠键。外接根池在
+# 唤醒时可能重新枚举，池 suspend 后整机卡在 I/O 上；内置 NVMe 根保持 elogind
+# 默认，不把本来可用的睡眠一并关掉。钩子同步执行，内部已保证失败也 exit 0。
+root_transport=$(lsblk -ndo TRAN "$disk")
+if [ "$root_transport" != nvme ]; then
+    install -Dm644 "$TARGET/opt/ordo/config/desktop/elogind/logind.conf.d/10-ordo-external-root.conf" \
+        "$TARGET/etc/elogind/logind.conf.d/10-ordo-external-root.conf"
+    install -Dm755 "$TARGET/opt/ordo/config/desktop/elogind/system-sleep/50-ordo-root-pool.sh" \
+        "$TARGET/lib/elogind/system-sleep/50-ordo-root-pool.sh"
+else
+    warn "根池位于 NVMe，保留 elogind 默认睡眠策略（未安装外接盘专有配置）"
+fi
 
 build_version=$(cat "$TARGET/opt/ordo/version")
 version=${build_version%%-*}
@@ -454,9 +512,13 @@ if [ "$USB_PAYLOAD" = 1 ]; then
     done
     chroot "$TARGET" /bin/sh /opt/ordo/scripts/ordo-config apply world || die "无法启用平台包集"
     for service in dbus:default elogind:boot zfs-import:boot zfs-mount:boot \
-        NetworkManager:default power-profiles-daemon:default chronyd:default cronie:default local:default; do
+        NetworkManager:default chronyd:default cronie:default local:default; do
         chroot "$TARGET" rc-update add "${service%:*}" "${service#*:}" || die "无法启用 $service"
     done
+    # sysklogd 不阻断安装：旧 rootfs 的 @world 里还没有它，缺服务时
+    # 下一次 sysup 会随 world 一起补上；这里只让新镜像开机即有日志。
+    chroot "$TARGET" rc-update add sysklogd default 2>/dev/null || \
+        warn "sysklogd 未注册（rootfs 未含 app-admin/sysklogd，sysup 会补装）"
 fi
 chroot "$TARGET" /bin/sh -c '
     rc-update del sshd default 2>/dev/null || true
@@ -530,6 +592,10 @@ XEOF
 zpool set bootfs="$ROOTDS" "$POOL"
 zfs set canmount=on "$HOMEDS"
 zfs snapshot "$ROOTDS@install-$(date +%Y%m%d-%H%M%S)"
+# 构建/验收残留：与 install.sh §18 共用 scripts/ordo-snap cleanup-build
+# （bootfs 判据在脚本内）。此时 bootfs 已切到 $ROOTDS，清理不会碰在用的 BE。
+chroot "$TARGET" /bin/sh /opt/ordo/scripts/ordo-snap cleanup-build 2>/dev/null || \
+    warn "构建残留清理未完成（装完可执行 doas ordo snap cleanup-build）"
 umount -R "$TARGET"
 zpool export "$POOL"
 pool_created=0

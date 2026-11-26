@@ -83,7 +83,9 @@ start = ["launcher", "wallpaper", "workspaces"]
 center = ["clock", "weather", "active_window", "media", "audio-vis"]
 # 插件 bar widget 直接以完整类型串挂进列表（不走 [widget.*] 声明，
 # 声明式写法会被 config 解析器报 unrecognized——factory 只认类型串）
-end = ["tray", "network", "volume", "thepunkoff/pomodoro:widget", "battery", "control-center"]
+# 社区插件不硬挂：插件源在离线/受限网络下不可达（D3-2），挂上只会得到
+# 一个缺席的 widget。番茄钟装好后按下面注释手动加回。
+end = ["tray", "network", "volume", "battery", "control-center"]
 
 # 音频频谱 widget（PipeWire monitor 流），id 被 center 引用
 [widget.audio-vis]
@@ -96,9 +98,13 @@ color_2 = "secondary"
 
 # 番茄钟（视频里 5:00 Start/Reset 计时器的替代品：内建无 timer 类型，
 # 用社区插件补位）。bar widget 显示剩余时间，点击开面板。
+#
+# 默认不启用：插件源需要联网，离线安装时 bar 会挂一个无法实例化的 widget。
+# 联网装好插件后，把 enabled 改成 ["thepunkoff/pomodoro"]，并在
+# [bar.main] 的 end 列表里加回 "thepunkoff/pomodoro:widget"。
 # 插件清单：声明式启用，等同 Settings → Plugins 的开关
 [plugins]
-enabled = ["thepunkoff/pomodoro"]
+enabled = []
 
 # ==============================================================================
 # Dock —— 视频同款是「无 dock + 桌面小组件撑桌面」，故关闭。
@@ -180,8 +186,10 @@ path = "/usr/share/backgrounds/ordo/wallpaper-blackhole.png"
 # ==============================================================================
 # 桌面小组件（v5 招牌功能）—— 直接铺在壁纸上的 layer-shell（Bottom 层）
 #
-# 坐标是按 2560x1440 / Virtual-1 的第一版手排（对照视频构图），
-# box_* = 0 自动适配内容。精调流程（符合「config/ 是唯一事实来源」）：
+# 坐标是按 2560x1440 画布手工摆放的（对照视频构图），box_* = 0 自动适配内容。
+# 不写 output = "..."：小组件跟随合成器默认输出（M2 真机 eDP-1、VM Virtual-1）。
+# 写死输出名会在另一平台不显示或错位，verify-hardware.sh 会把未连接的输出报成异常。
+# 精调流程（符合「config/ 是唯一事实来源」）：
 #   noctalia msg desktop-widgets-edit   # 空工作区拖/lasso/旋转
 #   Settings → Export Config → Merged User Config
 #   把导出的 [desktop_widgets] 回填覆盖本段
@@ -193,13 +201,11 @@ widget_order = ["sysmon_main", "clock_main", "media_main", "weather_main", "stic
 
 [desktop_widgets.widget.sysmon_main]
 type = "sysmon"
-output = "Virtual-1"
 cx = 560.0
 cy = 500.0
 
 [desktop_widgets.widget.clock_main]
 type = "clock"
-output = "Virtual-1"
 cx = 420.0
 cy = 1050.0
 
@@ -210,7 +216,6 @@ background_opacity = 0.6
 
 [desktop_widgets.widget.media_main]
 type = "media_player"
-output = "Virtual-1"
 cx = 1280.0
 cy = 620.0
 
@@ -220,7 +225,6 @@ hide_when_no_media = true
 
 [desktop_widgets.widget.weather_main]
 type = "weather"
-output = "Virtual-1"
 cx = 2050.0
 cy = 1060.0
 
@@ -245,7 +249,6 @@ background = false
 # (700,360) 拉开 40px 垂直净空，与星环上缘（y≈650）仍留 90px。
 [desktop_widgets.widget.sticker_main]
 type = "sticker"
-output = "Virtual-1"
 cx = 1650.0
 cy = 1320.0
 
@@ -308,6 +311,9 @@ effects = true
 # ==============================================================================
 # 控制中心与系统
 # ==============================================================================
+# 电源档位：M2 没有可用的 ppd 后端。config/platform/m2/world.usb 已移除
+# power-profiles-daemon，安装器也不再启用该服务；控制中心不再假装有档位。
+# 电池百分比与充电状态仍由 UPower 提供，不受影响。
 [control_center]
 show_avatar_border = false
 

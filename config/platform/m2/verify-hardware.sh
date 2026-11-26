@@ -2,7 +2,7 @@
 # Run as the logged-in Wayland user on a MacBook Air M2 (J413).
 set -u
 
-case "${1:-}" in ''|--capture-camera|--session-report) ;; *) exit 2 ;; esac
+case "${1:-}" in ''|--capture-camera|--session-report|--resume) ;; *) exit 2 ;; esac
 capture=${1:-}
 if [ ! -r /proc/device-tree/compatible ] ||
    ! tr '\000' '\n' < /proc/device-tree/compatible | grep -Fxq apple,j413; then
@@ -36,8 +36,24 @@ if [ "$capture" = --session-report ]; then
             LC_ALL=C timeout 5 bluetoothctl show |
                 awk '/^[[:space:]]*(Powered|PowerState|Discovering):/ {print}' || :
         fi
+        # 外接盘掉线/池 suspend 时 zedlet 会留下持久标记。会话启动（Umbriel
+        # autostart 调用本模式）必须把它弹出来，否则用户只会看到「东西少了一截」。
+        if [ -r /run/ordo/root-pool-failed ]; then
+            printf '根池故障标记：\n'
+            sed 's/^/  /' /run/ordo/root-pool-failed 2>/dev/null || :
+            printf '异常  外接根池故障（%s）\n' "$(sed -n '1p' /run/ordo/root-pool-failed 2>/dev/null)"
+            # critical 通知不会自动消失：池没修好之前每次登录都提示。
+            if command -v notify-send >/dev/null 2>&1; then
+                timeout 5 notify-send -u critical -a ordo '外接系统盘故障' \
+                    "$(sed -n '1,3p' /run/ordo/root-pool-failed 2>/dev/null)" 2>/dev/null || :
+            fi
+        fi
         timeout 45 sh "$(readlink -f "$0")" || report_status=$?
         case "$report_status" in 0|1|2) ;; *) report_status=2 ;; esac
+        # 标记仍在 = 池当前仍故障；硬件项即使全绿也不能打通过（doctor 是消费者）。
+        if [ -e /run/ordo/root-pool-failed ] && [ "$report_status" = 0 ]; then
+            report_status=1
+        fi
         printf 'exit=%s\n' "$report_status"
     } > "$tmp" && mv -f -- "$tmp" "$state/m2-hardware.log" || exit 2
     exit "$report_status"
@@ -106,17 +122,51 @@ gpu() {
     fi
 }
 
+# 扬声器保护缺失标记：install-hardware.sh 用 tmpfiles 建 /run/ordo（root:ordo 0750），
+# 会话里的 ordo 用户可写。写不进去也不影响检查结论，所以全部尽力而为。
+marker_dir=${ORDO_RUN_DIR:-/run/ordo}
+speaker_missing() {
+    mkdir -p "$marker_dir" 2>/dev/null || :
+    printf '%s\n' "$1" > "$marker_dir/speaker-protection-missing" 2>/dev/null || :
+}
+speaker_ok() {
+    rm -f "$marker_dir/speaker-protection-missing" 2>/dev/null || :
+}
+
 audio() {
-    pgrep -u speakersafetyd -x speakersafetyd >/dev/null 2>&1 || return 1
+    pgrep -u speakersafetyd -x speakersafetyd >/dev/null 2>&1 || {
+        speaker_missing 'speakersafetyd 未运行'
+        return 1
+    }
     command -v amixer >/dev/null && command -v pw-dump >/dev/null || return 2
-    controls=$(amixer -c AppleJ413 controls 2>/dev/null) || return 2
+    controls=$(amixer -c AppleJ413 controls 2>/dev/null) || {
+        speaker_missing '读不到 AppleJ413 的 ALSA 控制'
+        return 1
+    }
     lock=$(printf '%s\n' "$controls" | sed -n "s/^numid=\([0-9][0-9]*\),.*name='Speaker Volume Unlock'$/\1/p")
-    [ -n "$lock" ] || return 1
-    state=$(amixer -c AppleJ413 cget "numid=$lock" 2>/dev/null) || return 2
-    printf '%s\n' "$state" | grep -Eq '^[[:space:]]*: values=1$' || return 1
-    routes=$(pw-dump 2>/dev/null) || return 2
-    printf '%s\n' "$routes" | grep -Fq '"node.name": "audio_effect.j413-convolver"' &&
-        printf '%s\n' "$routes" | grep -Fq '"node.name": "effect_output.j413-mic"'
+    [ -n "$lock" ] || {
+        speaker_missing '缺少 Speaker Volume Unlock 控制'
+        return 1
+    }
+    state=$(amixer -c AppleJ413 cget "numid=$lock" 2>/dev/null) || {
+        speaker_missing '读不到扬声器音量锁状态'
+        return 1
+    }
+    printf '%s\n' "$state" | grep -Eq '^[[:space:]]*: values=1$' || {
+        speaker_missing '扬声器音量锁未启用'
+        return 1
+    }
+    routes=$(pw-dump 2>/dev/null) || {
+        speaker_missing '读不到 PipeWire 音频路由'
+        return 1
+    }
+    if ! printf '%s\n' "$routes" | grep -Fq '"node.name": "audio_effect.j413-convolver"' ||
+       ! printf '%s\n' "$routes" | grep -Fq '"node.name": "effect_output.j413-mic"'; then
+        speaker_missing '缺少 J413 扬声器/麦克风 DSP 节点'
+        return 1
+    fi
+    speaker_ok
+    return 0
 }
 
 keyboard() {
@@ -125,6 +175,58 @@ keyboard() {
         --object-path /org/freedesktop/UPower/KbdBacklight \
         --method org.freedesktop.UPower.KbdBacklight.GetMaxBrightness 2>/dev/null) || return 1
     printf '%s\n' "$level" | grep -Eq '^\([1-9][0-9]*,\)$'
+}
+
+# 屏幕背光：Fn 键最终落到 Noctalia 的 brightness-*，但面板是否存在必须有人验收。
+# /sys/class/backlight 为空或 max_brightness=0 时 Fn 键什么也改不了（D2-3）。
+backlight() {
+    for _device in /sys/class/backlight/*; do
+        [ -d "$_device" ] || continue
+        if [ ! -r "$_device/max_brightness" ]; then
+            printf '  待验：背光设备的 max_brightness 不可读（%s）\n' "$_device" >&2
+            return 2
+        fi
+        _max=$(cat "$_device/max_brightness" 2>/dev/null) || return 2
+        case "$_max" in
+            ''|*[!0-9]*) return 2 ;;
+        esac
+        [ "$_max" -gt 0 ] && return 0
+    done
+    printf '  原因：没有可用的屏幕背光设备（/sys/class/backlight 为空或 max_brightness=0）\n' >&2
+    return 1
+}
+
+# 桌面小组件输出：Noctalia 配置里的每个 output 名字必须能在 /sys/class/drm
+# 找到且已连接。写死 Virtual-1 在 M2 真机（eDP）上只会不显示或错位（D3-1）；
+# 不写 output（走默认输出）视为通过。
+widgets() {
+    _config=${XDG_CONFIG_HOME:-"$HOME/.config"}/noctalia/config.toml
+    if [ ! -r "$_config" ]; then
+        printf '  待验：找不到 Noctalia 配置（%s）\n' "$_config" >&2
+        return 2
+    fi
+    _connected=
+    for _connector in /sys/class/drm/card*-*; do
+        [ -r "$_connector/status" ] || continue
+        [ "$(cat "$_connector/status" 2>/dev/null)" = connected ] || continue
+        _name=${_connector##*/card}
+        _connected="$_connected ${_name#*-}"
+    done
+    _missing=
+    while IFS= read -r _output; do
+        [ -n "$_output" ] || continue
+        case " $_connected " in
+            *" $_output "*) ;;
+            *) _missing="$_missing $_output" ;;
+        esac
+    done <<EOF
+$(sed -n 's/^[[:space:]]*output[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$_config" 2>/dev/null)
+EOF
+    if [ -n "$_missing" ]; then
+        printf '  原因：小组件引用了未连接/不存在的输出：%s（默认输出请省略 output 键）\n' "$_missing" >&2
+        return 1
+    fi
+    return 0
 }
 
 battery() {
@@ -240,14 +342,28 @@ input() {
         grep -Fxl 'Apple MTP multi-touch' /sys/class/input/input*/name >/dev/null 2>&1
 }
 
-check '内屏已连接到 Apple DRM' display
-check 'Broadcom 无线网卡已注册' wireless
-check '蓝牙控制器已注册' bluetooth
-check '内置键盘和触控板已注册' input
-check 'Umbriel 会话和 Mesa Wayland EGL 使用 AGX' gpu
-check 'J413 扬声器保护、扬声器 DSP 和麦克风 DSP' audio
-check 'UPower 可访问键盘背光' keyboard
-check '电池状态和容量' battery
-check '内置摄像头读取帧（需 --capture-camera）' camera
+if [ "$capture" = --resume ]; then
+    # 唤醒后只复检这三项：GPU/EGL 与电池状态由合成器和 UPower 自己恢复，
+    # eglinfo 在 resume 后常因 DRM 节点重枚举给出假红（D0-2）。
+    check 'Broadcom 无线网卡已注册' wireless
+    check 'J413 扬声器保护、扬声器 DSP 和麦克风 DSP' audio
+    check '内置键盘和触控板已注册' input
+else
+    check '内屏已连接到 Apple DRM' display
+    check 'Broadcom 无线网卡已注册' wireless
+    check '蓝牙控制器已注册' bluetooth
+    check '内置键盘和触控板已注册' input
+    check 'Umbriel 会话和 Mesa Wayland EGL 使用 AGX' gpu
+    check 'J413 扬声器保护、扬声器 DSP 和麦克风 DSP' audio
+    check 'UPower 可访问键盘背光' keyboard
+    check '屏幕背光设备可用于亮度调节' backlight
+    check '电池状态和容量' battery
+    check '桌面小组件输出在已连接的显示器上' widgets
+    # 摄像头默认不参与例行检查：apple-isp 还没进 platform-modules，恒红会把
+    # 真异常和“未支持”混在一起（D2-1）。显式 --capture-camera 时才读取三帧。
+    if [ "$capture" = --capture-camera ]; then
+        check '内置摄像头读取帧' camera
+    fi
+fi
 [ "$failed" = 0 ] || exit 1
 [ "$unknown" = 0 ] || exit 2

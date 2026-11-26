@@ -224,6 +224,46 @@ else
     skip "无 python3，跳过 keys.md × keybinds 检查"
 fi
 
+# 桌面契约文件：门户后端与默认关联是数据，但格式和指向必须唯一且可核对。
+# 只在 lint 里做静态形状检查；doctor/用例负责运行时与真实文件。
+printf '\n== 桌面契约文件 ==\n'
+_bad_portals=""
+if [ -f config/desktop/portals.conf ]; then
+    grep -qx '\[preferred\]' config/desktop/portals.conf || _bad_portals="$_bad_portals 缺[preferred]"
+    grep -qx 'default=gtk' config/desktop/portals.conf || _bad_portals="$_bad_portals 缺default=gtk"
+    for _impl in FileChooser Screenshot ScreenCast; do
+        grep -qx "org.freedesktop.impl.portal.${_impl}=umbriel" config/desktop/portals.conf \
+            || _bad_portals="$_bad_portals ${_impl}≠umbriel"
+    done
+    _extra=$(grep -vcE '^[[:space:]]*(#|$|\[preferred\]|default=gtk|org\.freedesktop\.impl\.portal\.(FileChooser|Screenshot|ScreenCast)=umbriel)' \
+        config/desktop/portals.conf 2>/dev/null || true)
+    [ "${_extra:-0}" = 0 ] || _bad_portals="$_bad_portals 有未识别行(${_extra})"
+else
+    _bad_portals="缺少 config/desktop/portals.conf"
+fi
+if [ -z "$_bad_portals" ]; then
+    pass "portals.conf 后端指向 umbriel（其余 gtk）"
+else
+    fail "portals.conf 不合规:$_bad_portals"
+fi
+
+_bad_mime=""
+if [ -f config/desktop/skel/.config/mimeapps.list ]; then
+    grep -qx '\[Default Applications\]' config/desktop/skel/.config/mimeapps.list \
+        || _bad_mime="$_bad_mime 缺[Default Applications]"
+    for _m in application/pdf image/png video/mp4; do
+        grep -q "^${_m}=" config/desktop/skel/.config/mimeapps.list \
+            || _bad_mime="$_bad_mime 缺${_m}"
+    done
+else
+    _bad_mime="缺少 config/desktop/skel/.config/mimeapps.list"
+fi
+if [ -z "$_bad_mime" ]; then
+    pass "mimeapps.list 覆盖 PDF/图片/视频默认项"
+else
+    fail "mimeapps.list 不合规:$_bad_mime"
+fi
+
 # overlay 的 Manifest 必须随包入库：overlay/.gitignore 曾用
 # `gui-apps/*/Manifest` 忽略新包的清单，新增覆盖包会静默丢校验文件。
 printf '\n== overlay Manifest ==\n'

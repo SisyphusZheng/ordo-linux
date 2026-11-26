@@ -1,0 +1,172 @@
+#!/bin/sh
+# ordo-maintenance — 维护类定时任务的唯一装配入口（enable / status）
+#
+# 【为什么需要】快照 cron 与每月 scrub 的文本过去只写在 install.sh 里：
+# M2 外置安装只 rc-update add cronie，从不写 /etc/cron.d/ordo-snapshot；
+# VM 装配器又另写一套。三处各抄一份的结果是「装完看起来有 cron，
+# 实际没有任何快照任务」（D1-6）。现在三个安装路径都调本脚本，
+# 配置文本只在这里定义一次。
+#
+# 用法：
+#   ordo-maintenance enable   写入两个 cron 文件并确保 cronie 在 default runlevel
+#   ordo-maintenance status   三态检查：0 完整 | 1 缺件 | 2 无法判定
+#
+# 环境变量（测试与非常规布局用）：
+#   ORDO_CRON_DIR      /etc/cron.d   快照任务的落点
+#   ORDO_CRON_MONTHLY  /etc/cron.monthly   scrub 的落点
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+. "$_dir/lib.sh"
+
+PROG="ordo-maintenance"
+CRON_DIR="${ORDO_CRON_DIR:-/etc/cron.d}"
+CRON_MONTHLY="${ORDO_CRON_MONTHLY:-/etc/cron.monthly}"
+SNAP_CRON="$CRON_DIR/ordo-snapshot"
+SCRUB_CRON="$CRON_MONTHLY/zfs-scrub"
+
+ACTION="${1:-status}"
+
+usage() {
+    cat <<EOF
+$PROG — 维护类定时任务（快照 / scrub）
+
+用法: $PROG <动作>
+
+动作:
+  enable   写入 $SNAP_CRON 与 ${SCRUB_CRON}，并把 cronie 加进 default
+  status   检查两文件与 cronie 状态（退出码 0/1/2）
+
+退出码: 0 完整 | 1 缺件 | 2 无法判定
+EOF
+}
+
+# 快照任务的文本。SHELL/PATH 显式给出：cron 的环境极简，
+# 缺 PATH 时脚本里的 zfs 可能根本不在搜索路径上。
+write_snapshot_cron() {
+    mkdir -p "$CRON_DIR"
+    _tmp="$SNAP_CRON.tmp.$$"
+    cat > "$_tmp" <<'CRON'
+# ordo 定时快照：每小时一次，分档保留（24 小时 / 7 天 / 4 周）
+# 执行体是 scripts/ordo-snap-auto（装到 /opt/ordo/scripts/，软链到 /usr/local/bin），
+# 对象是 RUNNING_ROOT（回滚后也对）。由 ordo-maintenance 生成，改动请改那里。
+SHELL=/bin/sh
+PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin
+17 * * * * root /usr/local/bin/ordo-snap-auto >/dev/null 2>&1
+CRON
+    mv -f "$_tmp" "$SNAP_CRON"
+    chmod 644 "$SNAP_CRON"
+}
+
+# 每月 scrub：读全盘校验 checksum，发现并修复静默损坏。
+# $POOL 在生成时展开（lib.sh 已从 config/dataset 读到），ORDO_POOL 可运行期覆盖。
+write_scrub_cron() {
+    mkdir -p "$CRON_MONTHLY"
+    _tmp="$SCRUB_CRON.tmp.$$"
+    cat > "$_tmp" <<SCRUB
+#!/bin/sh
+# 每月池 scrub（读全盘校验 checksum，发现并修复静默损坏）
+# 由 ordo-maintenance 生成；改动请改 scripts/ordo-maintenance。
+POOL="\${ORDO_POOL:-$POOL}"
+if zpool list -H -o name 2>/dev/null | grep -qx "\$POOL"; then
+    logger -t ordo-scrub "starting scrub on \$POOL"
+    zpool scrub "\$POOL" 2>&1 | logger -t ordo-scrub
+else
+    logger -t ordo-scrub "pool \$POOL not found, skip"
+fi
+SCRUB
+    mv -f "$_tmp" "$SCRUB_CRON"
+    chmod 755 "$SCRUB_CRON"
+}
+
+# cronie 必须在 default runlevel；二进制在 ≠ 开机会被拉起。
+ensure_cronie() {
+    if ! command -v rc-update >/dev/null 2>&1; then
+        # 没有 rc-update 不等于 cron 不会跑（容器/手工部署），但无法判定。
+        return 2
+    fi
+    if rc-update show default 2>/dev/null | grep -q '^[[:space:]]*cronie'; then
+        return 0
+    fi
+    rc-update add cronie default >/dev/null 2>&1 || return 1
+    return 0
+}
+
+cmd_enable() {
+    require_root "$PROG enable"
+    ordo_say "启用维护定时任务（快照 + 每月 scrub）"
+    write_snapshot_cron
+    ordo_ok "已写入 ${SNAP_CRON}（每小时，保留 24 小时 / 7 天 / 4 周）"
+    write_scrub_cron
+    ordo_ok "已写入 ${SCRUB_CRON}（每月 scrub）"
+
+    # set -e 下不能写 `ensure_cronie` 再查 $?：非零返回会当场退出。
+    _cronie_rc=0
+    ensure_cronie || _cronie_rc=$?
+    case "$_cronie_rc" in
+        0) ordo_ok "cronie 在 default runlevel" ;;
+        2) ordo_warn "找不到 rc-update，无法确认 cronie 是否随开机启动（不是通过）"
+           exit 2 ;;
+        *) ordo_bad "cronie 未在 default runlevel，且注册失败 —— 定时任务不会执行"
+           ordo_bad "  修复：emerge sys-process/cronie && rc-update add cronie default"
+           exit "$ORDO_EXIT_BAD" ;;
+    esac
+    return 0
+}
+
+cmd_status() {
+    _bad=0
+    _unknown=0
+
+    if [ -f "$SNAP_CRON" ] && grep -q 'ordo-snap-auto' "$SNAP_CRON" 2>/dev/null; then
+        ordo_ok "快照任务 $SNAP_CRON"
+    else
+        ordo_bad "缺少快照任务 ${SNAP_CRON}（enable 可启用）"
+        _bad=1
+    fi
+
+    if [ -x "$SCRUB_CRON" ]; then
+        ordo_ok "scrub 任务 $SCRUB_CRON"
+    elif [ -f "$SCRUB_CRON" ]; then
+        ordo_bad "scrub 任务没有可执行位（run-parts 会跳过）$SCRUB_CRON"
+        _bad=1
+    else
+        ordo_bad "缺少 scrub 任务 ${SCRUB_CRON}（enable 可启用）"
+        _bad=1
+    fi
+
+    if command -v rc-update >/dev/null 2>&1; then
+        if rc-update show default 2>/dev/null | grep -q '^[[:space:]]*cronie'; then
+            ordo_ok "cronie 在 default runlevel"
+        else
+            ordo_bad "cronie 不在 default runlevel，cron 文件不会被执行"
+            _bad=1
+        fi
+    else
+        ordo_warn "找不到 rc-update，无法判定 cronie 是否随开机启动"
+        _unknown=1
+    fi
+
+    if command -v rc-service >/dev/null 2>&1; then
+        if rc-service cronie status 2>/dev/null | grep -q started; then
+            ordo_ok "cronie 正在运行"
+        else
+            ordo_bad "cronie 未运行（rc-service cronie start）"
+            _bad=1
+        fi
+    else
+        _unknown=1
+    fi
+
+    if [ "$_bad" -ne 0 ]; then exit "$ORDO_EXIT_BAD"; fi
+    if [ "$_unknown" -ne 0 ]; then exit "$ORDO_EXIT_UNKNOWN"; fi
+    return 0
+}
+
+case "$ACTION" in
+    enable) cmd_enable ;;
+    status) cmd_status ;;
+    -h|--help|help) usage ;;
+    *) usage >&2; exit "$ORDO_EXIT_BAD" ;;
+esac

@@ -67,7 +67,7 @@ media-video/wireplumber    # 会话/设备策略；缺它没声音，Noctalia �
 
 # ---- 桌面功能组件 ----
 media-sound/playerctl    # 媒体键落地（XF86AudioPlay/Next/Prev；noctalia msg media 不可用，偏离 #61）。
-                         # brightnessctl 已移除（偏离 #65 同轮清理）：亮度走 noctalia msg brightness-*，VM 无背光消费者；真机需要时按此格式重加
+                         # 亮度走 noctalia msg brightness-*（不装 brightnessctl）；真机若无背光设备，由 verify-hardware.sh 的背光项报出。
 gui-apps/wl-clipboard    # 剪贴板（截图键位 wl-copy）
 gui-apps/grim    # 截图（键位直接调用）
 gui-apps/slurp    # 区域选择
@@ -116,7 +116,15 @@ app-misc/fastfetch    # 系统信息展示（Ordo 品牌）
 app-misc/tmux    # 终端复用：状态栏 + 窗格编排 + 会话持久
 
 # ---- 系统服务 ----
-sys-process/cronie    # 定时快照（/etc/cron.d/ordo-snapshot）
+sys-process/cronie    # 定时快照（/etc/cron.d/ordo-snapshot）与每月 scrub
+# 诊断前置：没有 syslog 守护时 logger(1) 写进虚空，/var/log 只有 dmesg 与
+# emerge 的输出；合盖冻结、池 suspend、扬声器保护失效都留不下现场。
+# 配置文件由 install.sh §7a 落 /etc/syslog.conf 与 /etc/logrotate.d/ordo。
+app-admin/sysklogd
+app-admin/logrotate    # sysklogd 不自带轮转；缺它 messages 会吃满外置系统盘
+# 电源事件走 UPower：Noctalia 控制中心的电池/充电档位读 UPower 的 D-Bus。
+# 从 config/platform/m2/world 上移——VM 与真机都需要它，M2 集不再重复声明。
+sys-power/upower
 
 # ---- 引导/文件系统工具 ----
 sys-boot/efibootmgr

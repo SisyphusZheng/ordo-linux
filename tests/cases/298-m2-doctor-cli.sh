@@ -41,7 +41,7 @@ test ! -s "$_world_tmp/extra" && test ! -s "$_world_tmp/missing" || {
 }
 WORLD
 
-for name in ordo-backup ordo-migrate ordo-snap ordo-snap-auto ordo-selfcheck ordo-wifi sysup; do
+for name in ordo-backup ordo-migrate ordo-snap ordo-snap-auto ordo-selfcheck ordo-wifi ordo-maintenance ordo-selfupdate sysup; do
     printf '#!/bin/sh\nexit 0\n' > "$ordo/scripts/$name"
 done
 chmod +x "$ordo/scripts/"*

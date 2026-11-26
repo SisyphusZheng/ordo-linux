@@ -43,7 +43,7 @@ ZFS 系统快照。具体机型和验收范围见下表。
 
 | 约束 | 含义 |
 |---|---|
-| 一个入口 | 操作经 `ordo`：`sysup` / `snap` / `backup` / `config` / `app` / `doctor` |
+| 一个入口 | 操作经 `ordo`：`sysup` / `snap` / `backup` / `config` / `app` / `doctor` / `selfupdate` / `ssh` |
 | 一份配置 | `config/` 是系统定义。`/etc` 由它部署生成 |
 | 一种分发 | 系统层 Portage；应用层 Flatpak |
 | 一种回滚 | ZFS boot environment |
@@ -87,6 +87,18 @@ ZFS 系统快照。具体机型和验收范围见下表。
 - 应用清单定义在 `config/apps.d/`
 - 判定标准：需要审计或修改的进 core，否则走 Flatpak
 
+### 5. 桌面与运维能力
+
+| 能力 | 入口 | 验收 |
+|---|---|---|
+| 自更新 | `ordo selfupdate --from <tar.gz> --sha256 <hex>` | 原子切换 `/opt/ordo` |
+| 升级与迁移 | `ordo sysup` | 快照 → 自更新 → 迁移 → 可用性校验 |
+| 备份 | `ordo backup send <目录>` | 运行根 + `/home` 双流与 manifest；`verify` 逐流校验 |
+| 快照 / scrub 定时任务 | `ordo-maintenance enable/status` | 两个 cron 文件 + cronie runlevel |
+| SSH 开关 | `ordo ssh on/off/status` | `sshd -t` + runlevel |
+| 清理构建残留 | `ordo snap cleanup-build` | 按 `config/dataset` 的候选，bootfs 拒绝销毁 |
+| 桌面运行时体检 | `ordo doctor` | 密钥服务、门户、syslog、睡眠策略、维护 cron、wezterm |
+
 ---
 
 ## 四、技术栈
@@ -100,6 +112,7 @@ ZFS 系统快照。具体机型和验收范围见下表。
 | 桌面 | Umbriel | Wayland 合成器，四种布局 |
 | 桌面外壳 | Noctalia Shell | 顶栏/启动器/锁屏/通知/壁纸，同一程序 |
 | 登录 | greetd + Noctalia Greeter | 图形界面，无 GTK/Qt 依赖 |
+| 门户 | xdg-desktop-portal-umbriel | 文件选择、截图、录屏；其余接口走 gtk |
 | 文件管理 | Luciole | 图形文件管理器 |
 | 应用 | Flatpak + Flathub | 沙箱、独立更新 |
 | 镜像 | USTC | 覆盖 Portage 与 distfiles |
@@ -112,7 +125,7 @@ ZFS 系统快照。具体机型和验收范围见下表。
 |---|---|---|
 | 内核 / ZFS / init | Portage | `sys-kernel/*`, `sys-fs/zfs`, `sys-apps/openrc` |
 | 桌面外壳 | Portage | `gui-wm/umbriel`, `gui-apps/noctalia`, `gui-apps/luciole`, `gui-libs/greetd`, `gui-apps/noctalia-greeter`, `xdg-desktop-portal-*` |
-| 字体 / 输入法 | Portage | `media-fonts/noto-cjk`, `app-i18n/fcitx` + `fcitx-rime` + `fcitx-gtk` |
+| 字体 / 输入法 | Portage | `media-fonts/noto-cjk`, `app-i18n/fcitx` + `fcitx-rime`（GTK/Qt 走 text-input-v3，不装 immodule） |
 | 应用 | Flatpak | Firefox、LibreOffice、Telegram、VS Code、GIMP |
 | 开发工具链 | Portage / 容器 | 系统级安装；项目依赖走容器 |
 
@@ -129,6 +142,7 @@ ZFS 系统快照。具体机型和验收范围见下表。
 5. **系统层可编译**：记录实测数据，不设时间上限
 6. **中文开箱**：登录后为中文界面、可输入中文、时区正确、镜像指向 USTC
 7. **可验证**：`make check` 执行 lint 与回归测试；退出码 `0` 全绿 / `1` 有问题 / `2` 无法判定
+8. **桌面运行时**：Secret Service 往返、门户后端、syslog、外接盘睡眠策略、维护 cron 与 wezterm 属主由 `ordo doctor` 判定
 
 ### L1 实测记录（2026-11-18）
 
@@ -186,9 +200,11 @@ ZFS 系统快照。具体机型和验收范围见下表。
 │   ├── desktop/                # 桌面配置（见该目录 README）
 │   │   ├── umbriel/            # 合成器与会话脚本
 │   │   ├── noctalia/           # 桌面外壳
+│   │   ├── elogind/            # 外接盘睡眠策略与唤醒钩子
 │   │   ├── greetd/             # 登录屏配置与服务
+│   │   ├── portals.conf         # xdg-desktop-portal 后端选择
 │   │   ├── wallpapers/         # 壁纸（配色由它生成）
-│   │   └── skel/               # 用户配置模板
+│   │   └── skel/               # 用户配置模板（含 mimeapps.list）
 │   ├── package.use/            # USE flag
 │   ├── package.accept_keywords/
 │   ├── package.mask/
@@ -197,13 +213,15 @@ ZFS 系统快照。具体机型和验收范围见下表。
 ├── scripts/                    # POSIX sh
 │   ├── lib.sh                  # 公共机制：路径解析、退出码、工具检查
 │   ├── ordo                    # 统一入口（委托层）
-│   ├── sysup                   # 快照 → 升级 → 迁移 → 可用性校验
+│   ├── sysup                   # 快照 → 自更新 → 升级 → 迁移 → 可用性校验
+│   ├── ordo-selfupdate         # 从 release tarball 原子替换 /opt/ordo
+│   ├── ordo-maintenance        # 快照/scrub 定时任务的唯一装配入口
 │   ├── doctor                  # 约束一致性与漂移检查
 │   ├── ordo-config             # 配置入口
 │   ├── ordo-migrate            # 迁移执行器
 │   ├── ordo-selfcheck          # CLI 表与实现一致性检查
 │   ├── ordo-snap(-auto)        # 快照
-│   └── ordo-backup             # zfs send 离线备份
+│   └── ordo-backup             # zfs send 离线备份（root + home 双流）
 ├── tests/                      # 静态检查与回归用例
 ├── install.sh                  # 从官方 ISO 安装
 ├── Makefile                    # 开发入口

@@ -83,3 +83,35 @@ Ordo 安装 GNOME Keyring。正常登录时 PAM 用登录密码自动创建/解�
 时可能提示一次；退出后正常登录即可。旧 home 里若已有用其它密码创建的 keyring，
 应用访问时也会提示一次；备份后删除 `~/.local/share/keyrings/` 下的旧 keyring，
 下次登录会按登录密码重建。
+
+## 旧镜像升级后的一次性检查
+
+2026-11-26 这一轮修的是「旧镜像已安装、但缺运行时接线」的问题。升级后按顺序
+检查一次。命令在桌面会话里执行：标了 `doas` 的用 root，其余以 `ordo` 用户运行
+（`ordo doctor` 的密钥服务与门户项需要会话总线，加 `doas` 会丢掉总线变量）。
+
+```sh
+# 1. 总检：新增密钥服务往返、门户、syslog、睡眠策略、维护 cron、wezterm 属主
+ordo doctor
+
+# 2. wezterm 配置必须是可写的真实文件（不是软链）
+ls -l ~/.config/wezterm/wezterm.lua    # 期望 -rw-...，不是 lrwx...
+# 仍是软链：退出重新登录（会话入口自动落副本），或
+ordo config apply desktop
+
+# 3. 门户后端（登录时会话入口自动部署用户级副本）
+grep -n 'umbriel' ~/.config/xdg-desktop-portal/portals.conf
+
+# 4. 默认关联（新装由 /etc/skel 落；旧 home 手动补）
+[ -f ~/.config/mimeapps.list ] || install -Dm644 /etc/skel/.config/mimeapps.list ~/.config/mimeapps.list
+
+# 5. 定时快照与每月 scrub
+doas ordo-maintenance status
+
+# 6. 日志：没有 syslog 的系统看不到 /var/log/messages
+tail -n 50 /var/log/messages
+```
+
+第 2、3、4 项由登录会话自动完成，重登录一次即可；第 5 项缺件时运行
+`doas ordo-maintenance enable`。第 6 项在旧镜像上可能没有文件，需要重装或按
+[08 故障排查](08-troubleshooting.md) 的 syslog 一节处理。

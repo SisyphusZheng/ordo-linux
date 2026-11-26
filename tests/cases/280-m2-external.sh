@@ -43,7 +43,9 @@ with tarfile.open(fileobj=io.BytesIO(gzip.decompress(a))) as t:
     assert read("config/desktop/wallpapers/wallpaper-blackhole.png").startswith(b"\x89PNG")
 with tarfile.open(fileobj=io.BytesIO(gzip.decompress(bundle(include_legacy=False)))) as portable:
     world = portable.extractfile("config/platform/m2/world").read().splitlines()
-    assert b"sys-power/power-profiles-daemon" in world and b"sys-apps/i2c-tools" in world
+    # B6：M2 没有可用的 ppd 后端，电源档位面板随 D2-2 关闭；world.usb 不得再声明它。
+    assert b"sys-apps/i2c-tools" in world
+    assert b"sys-power/power-profiles-daemon" not in world
     assert "dev/m2/display/modules.tar.gz" not in portable.getnames()
     luciole = "overlay/gui-apps/luciole"
     for file in ("Manifest", luciole_ebuild()):

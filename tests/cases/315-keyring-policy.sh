@@ -41,7 +41,6 @@ with tarfile.open(fileobj=io.BytesIO(bundle(include_legacy=False))) as payload:
     for path in (
         "config/desktop/keyring-policy.sh",
         "config/package.use/ordo-keyring",
-        "config/migrations/1795627149-remove-gnome-keyring.sh",
     ):
         assert payload.extractfile(path).read() == Path(path).read_bytes()
     names = payload.getnames()

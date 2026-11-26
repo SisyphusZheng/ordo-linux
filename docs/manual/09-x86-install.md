@@ -87,7 +87,8 @@ ORDO_ARCH=amd64 ORDO_PLATFORM=bare-metal sh install.sh /dev/sda
 
 - 约 24 小时（678 包源码编译）
 - 重跑整个安装器会重新分区。中断后先保留目标盘并检查安装日志。
-- **建议**：接电源、关睡眠（`sudo systemctl mask sleep.target` 不适用，用 `echo -n mem > /sys/power/state` 前先 `setterm -blank 0`）
+- **建议**：接电源，安装期间不要合盖或让机器睡眠。本发行版不提供休眠
+  （hibernate）：默认没有 `resume=` 引导参数，也没有 swap 分区，休眠镜像无处可写。
 
 ## 7. 重启
 
@@ -106,7 +107,18 @@ passwd        # 改成你自己的
 # 验证
 ordo info
 ordo doctor
+
+# 远程登录（默认关闭）
+doas ordo ssh on      # 注册 sshd 到 default runlevel 并启动
+ordo ssh status       # 看 runlevel / 运行状态 / 策略文件
+doas ordo ssh off     # 移出 runlevel 并停止
 ```
+
+`ordo ssh on` 只写两处：`rc-update` 的 runlevel，以及
+`/etc/ssh/sshd_config.d/10-ordo.conf`（`PermitRootLogin no`、
+`PasswordAuthentication yes`、`KbdInteractiveAuthentication no`），
+并在 `sshd_config` 缺 `Include` 时补一行；重复执行不会叠加内容。
+开启前会先跑 `sshd -t`，配置不合法直接拒绝。
 
 ## 常见问题
 

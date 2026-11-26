@@ -5,12 +5,18 @@
 #
 # 操作对象为 RUNNING_ROOT，不是 DATASET（回滚后 DATASET 指向未运行的旧系统）。
 #
-# 默认行为：
-#   1. zfs send 不带 -R：单数据集流，范围可预测
-#   2. 先写 <目标>.part，成功后 mv：中断不留下半截备份
-#   3. 目标已存在时拒绝覆盖，需 --force
-#   4. 发送前比较 zfs get refer 与目标可用空间
-#   5. 不自动删除备份文件
+# 默认行为（A5：备份必须包含 /home）：
+#   1. send 默认发**两个流**：运行中的根数据集 + HOME_DATASET（各自单数据集
+#      send，不带 -R）。目标必须是目录，两个流加一份 manifest 落在同一目录。
+#   2. 单文件目标只放得下一个流，因此必须显式 --root-only（不推荐）。
+#   3. 先写 <目标>.part，成功后 mv：中断不留下半截备份。
+#   4. 两个流都成功才写 manifest；失败任一即中止并删除半成品。
+#   5. 发送前比较各快照 refer 之和与目标可用空间。
+#   6. 不自动删除备份文件。
+#
+# 【为什么改】旧版只发根数据集，手册唯一的备份命令得到的是不含 /home 的流：
+# 项目、文档、keyring、Flatpak 数据都不在内（D0-4）。「备份成功」的结论
+# 因此是假的，而用户不会去解包确认范围。
 
 set -eu
 
@@ -25,9 +31,11 @@ shift 2>/dev/null || true
 
 # 操作对象：永远用实际运行的根
 SNAP_TARGET="$RUNNING_ROOT"
+# 用户数据数据集：默认与根一起备份（A5）
+HOME_SNAP_TARGET="${HOME_DATASET:-rpool/home}"
 
 # 备份记录：只追加、不轮转。写不进去只警告，不阻断备份本身。
-BACKUP_LOG="/var/lib/ordo/backup.log"
+BACKUP_LOG="${ORDO_BACKUP_LOG:-/var/lib/ordo/backup.log}"
 
 # require_root 来自 lib.sh。
 
@@ -38,24 +46,25 @@ $PROG — ZFS 备份管理（zfs send 离线备份；快照 ≠ 备份）
 用法: $PROG <动作> [参数]
 
 动作:
-  send <目标路径> [选项] [快照名]
-                          把快照 zfs send 到目标（默认取最新快照）
-                          目标是「已存在的目录」时自动命名:
-                            <数据集路径带->-<快照名>-<时间戳>.zfs.gz
-                          显式文件路径则原样使用
-  list                    列出可备份的快照 + 最近备份记录
-  verify <备份文件>       干跑验证：gzip 校验 + zfs receive -n（不写入任何数据）
+  send <目标目录> [选项] [快照名]
+                          把根数据集与 /home 两个快照 zfs send 到目标目录，
+                          并写一份 manifest（两个流的清单）
+  list                    列出可备份的快照（根 + /home）+ 最近备份记录
+  verify <文件|目录|manifest>
+                          干跑验证：gzip 校验 + zfs receive -n（不写入任何数据）
+                          给目录时取其中最新的 manifest，逐个流验证
   status                  显示备份配置与最近一次备份
 
 send 选项:
+  --root-only             只发根数据集（不含 /home；单独文件目标时必须显式给出）
   --force                 允许覆盖已存在的目标（默认拒绝覆盖）
   --no-compress           不压缩，输出原始 ZFS 流（目录模式下扩展名 .zfs）
   -h, --help              显示本帮助
 
 对象与范围:
   - 备份源永远是「运行中的根数据集」($SNAP_TARGET)，不是配置里的规范名
-  - 单数据集发送（不带 -R）：$HOME_DATASET 等兄弟/子数据集不在备份内，
-    需要时请单独备份
+  - 默认包含 ${HOME_SNAP_TARGET}：两个流 + 一份 <时间戳>.manifest
+  - 每个流都是单数据集发送（不带 -R）；子数据集不在流内
   - 先写 <目标>.part，成功后 mv：中断不会留下半截的「完整备份」
   - 默认 zfs send | gzip，zfs send -v 的进度输出到 stderr
   - 本命令绝不自动删除任何备份文件
@@ -63,20 +72,35 @@ send 选项:
 示例:
   $PROG list
   $PROG send /mnt/usb-backup
-  $PROG send /mnt/usb-backup/ordo-20261119.zfs.gz
-  $PROG send /mnt/usb-backup --no-compress auto-hourly-20261119-120000
-  $PROG verify /mnt/usb-backup/rpool-root-ordo-auto-hourly-20261119-120000-20261119-211500.zfs.gz
+  $PROG send /mnt/usb-backup auto-hourly-20261119-120000
+  $PROG send /mnt/usb-backup --root-only /mnt/usb/root-only.zfs.gz
+  $PROG verify /mnt/usb-backup
   $PROG status
 EOF
 }
 
-snap_used() { zfs get -H -o value used "$SNAP_TARGET@$1" 2>/dev/null; }
-snap_time() { zfs get -H -o value creation "$SNAP_TARGET@$1" 2>/dev/null; }
+snap_used() { zfs get -H -o value used "$1@$2" 2>/dev/null; }
+snap_time() { zfs get -H -o value creation "$1@$2" 2>/dev/null; }
 
 # 最新快照名（不带 @；只取本数据集的，不含子数据集）
-latest_snapshot() {
-    zfs list -H -t snapshot -o name -s creation "$SNAP_TARGET" 2>/dev/null \
-        | grep "^$SNAP_TARGET@" | tail -1 | sed "s|^$SNAP_TARGET@||"
+latest_snapshot() { # dataset
+    zfs list -H -t snapshot -o name -s creation "$1" 2>/dev/null \
+        | grep "^$1@" | tail -1 | sed "s|^$1@||"
+}
+
+# 解析要发送的快照名：给了 want 就必须存在；没给就取最新。
+# 成功时打印快照名（不带 @），失败返回 1。
+snapshot_for() { # dataset [want]
+    _sp_ds=$1
+    _sp_want=${2:-}
+    if [ -n "$_sp_want" ]; then
+        zfs list -H -t snapshot -o name "$_sp_ds@$_sp_want" >/dev/null 2>&1 || return 1
+        printf '%s\n' "$_sp_want"
+        return 0
+    fi
+    _sp_latest="$(latest_snapshot "$_sp_ds")"
+    [ -n "$_sp_latest" ] || return 1
+    printf '%s\n' "$_sp_latest"
 }
 
 # 字节 → 人类可读（numfmt 是 coreutils 的标准工具，ordo-snap-auto 已在用）
@@ -105,7 +129,7 @@ _read_status() {
 }
 
 # 追加一条备份记录（尽力而为：失败只警告）
-record_backup() {
+record_backup() { # 数据集@快照 字节 目标
     _r_dir="$(dirname "$BACKUP_LOG")"
     if ! mkdir -p "$_r_dir" 2>/dev/null; then
         err "警告：无法创建记录目录 ${_r_dir}（备份本身已完成）" \
@@ -113,7 +137,7 @@ record_backup() {
         return 0
     fi
     if ! printf '%s|%s|%s|%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)" \
-            "$SNAP_TARGET@$1" "$2" "$3" >> "$BACKUP_LOG" 2>/dev/null; then
+            "$1" "$2" "$3" >> "$BACKUP_LOG" 2>/dev/null; then
         err "警告：无法写入备份记录 ${BACKUP_LOG}（备份本身已完成）" \
             "Warning: cannot write $BACKUP_LOG (the backup itself is done)"
     fi
@@ -133,12 +157,60 @@ show_log_tail() {
     done
 }
 
+# 发送一个数据集快照到文件（.part → mv 原子落盘）。
+# 退出码：0 成功 | 1 失败（半成品已删除）
+_send_stream() { # dataset@snap 目标文件 压缩(0|1)
+    _st_src=$1
+    _st_dest=$2
+    _st_compress=$3
+    _st_part="$_st_dest.part"
+    _st_rc=0
+    _st_send_rc=0
+
+    if [ "$_st_compress" = "1" ]; then
+        # POSIX sh 没有 pipefail：`zfs send | gzip` 的退出码只是 gzip 的，
+        # zfs send 中途失败而 gzip 正常结束时会被误判为成功（半截备份被当成完整）。
+        # 所以用状态文件把左端退出码带回来，两端都必须为 0。
+        _st_status="${TMPDIR:-/tmp}/ordo-backup-$$.status"
+        rm -f "$_st_status"
+        { zfs send -v "$_st_src" || printf '%s\n' "$?" > "$_st_status"; } \
+            | gzip > "$_st_part" || _st_rc=$?
+        if [ -s "$_st_status" ]; then
+            _st_send_rc="$(_read_status "$_st_status")"
+        fi
+        rm -f "$_st_status"
+    else
+        zfs send -v "$_st_src" > "$_st_part" || _st_rc=$?
+    fi
+
+    if [ "$_st_rc" -ne 0 ] || [ "$_st_send_rc" -ne 0 ]; then
+        err "备份失败（zfs send=$_st_send_rc, 写入=${_st_rc}）：$_st_src" \
+            "Backup failed (zfs send=$_st_send_rc, write=$_st_rc): $_st_src"
+        rm -f "$_st_part"
+        err "  已删除半成品 $_st_part" "  removed partial file $_st_part"
+        return 1
+    fi
+    if [ ! -s "$_st_part" ]; then
+        err "备份文件为空（异常）：$_st_part" "Backup file is empty (unexpected): $_st_part"
+        rm -f "$_st_part"
+        return 1
+    fi
+    # 原子落盘：同一目录内的 mv 是 rename，不会留下半截
+    if ! mv -f "$_st_part" "$_st_dest"; then
+        err "重命名失败，半成品保留在 $_st_part" "Rename failed; partial file kept at $_st_part"
+        return 1
+    fi
+    return 0
+}
+
 # ---------------------------------------------------------------------------
 # send — 把快照 zfs send 到文件（.part 原子写入）
 # ---------------------------------------------------------------------------
 cmd_send() {
     _force=0
     _compress=1
+    _include_home=1
+    _root_only=0
     _dest=""
     _want_snap=""
 
@@ -146,6 +218,7 @@ cmd_send() {
         case "$_a" in
             --force)       _force=1 ;;
             --no-compress) _compress=0 ;;
+            --root-only)   _include_home=0; _root_only=1 ;;
             -h|--help)     usage; exit 0 ;;
             -*)
                 err "未知选项：$_a" "Unknown option: $_a"
@@ -168,22 +241,23 @@ cmd_send() {
     require_root "$PROG backup send $*"
 
     if [ -z "$_dest" ]; then
-        err "需要目标路径（文件或已存在的目录）" "Destination path required (file or existing directory)"
+        err "需要目标路径（目录；单文件目标须加 --root-only）" \
+            "Destination required (a directory; single-file targets need --root-only)"
         msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
         exit 1
     fi
 
-    # --- 选择快照 ---
+    # --- 选择根快照 ---
     if [ -n "$_want_snap" ]; then
         _snap="${_want_snap#*@}"
-        zfs list -H -t snapshot -o name "$SNAP_TARGET@$_snap" >/dev/null 2>&1 || {
+        if ! snapshot_for "$SNAP_TARGET" "$_snap" >/dev/null; then
             err "快照不存在：${_snap}（数据集的快照：${SNAP_TARGET}）" \
                 "Snapshot not found: $_snap (on $SNAP_TARGET)"
             msg "先运行 '$PROG list' 查看可备份的快照" "Run '$PROG list' to see available snapshots"
             exit 1
-        }
+        fi
     else
-        _snap="$(latest_snapshot)"
+        _snap="$(latest_snapshot "$SNAP_TARGET")"
         if [ -z "$_snap" ]; then
             err "当前数据集没有快照：$SNAP_TARGET" "No snapshots on $SNAP_TARGET"
             msg "先创建快照：doas ordo snap create" "Create one first: doas ordo snap create"
@@ -191,15 +265,75 @@ cmd_send() {
         fi
     fi
 
+    # --- /home 快照（默认必须包含）---
+    # 优先同名快照：ordo-snap create / ordo-snap-auto 会给 /home 打同名快照，
+    # 这样两个流是同一时刻的一致视图。默认路径（取最新）允许 /home 用自己的
+    # 最新快照，但必须点名警告；显式指定快照名时不允许错配。
+    _home_snap=""
+    _home_in_root=0
+    if zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        if snapshot_for "$HOME_SNAP_TARGET" "$_snap" >/dev/null; then
+            _home_snap="$_snap"
+        elif [ -z "$_want_snap" ]; then
+            _home_snap="$(latest_snapshot "$HOME_SNAP_TARGET")"
+            if [ -n "$_home_snap" ]; then
+                err "警告：/home 没有与根同名的快照 ${_snap}，改用 ${_home_snap}（两流时间点不同）" \
+                    "Warning: /home has no snapshot named $_snap; using $_home_snap (different points in time)"
+            fi
+        fi
+        if [ -z "$_home_snap" ]; then
+            if [ "$_include_home" = "1" ]; then
+                err "无法备份 /home：$HOME_SNAP_TARGET 没有可用快照" \
+                    "Cannot back up /home: no snapshot on $HOME_SNAP_TARGET"
+                msg "  先运行 doas ordo snap create（会给 /home 打同名快照）" \
+                    "  Run 'doas ordo snap create' first (it snapshots /home too)"
+                msg "  确实只要根数据集时显式加 --root-only" \
+                    "  pass --root-only if you really want the root stream alone"
+                exit 1
+            fi
+            err "警告：$HOME_SNAP_TARGET 没有快照，--root-only 下不含 /home" \
+                "Warning: $HOME_SNAP_TARGET has no snapshot; --root-only excludes /home"
+        fi
+    elif [ "$_include_home" = "1" ]; then
+        # 没有独立 /home 数据集时 /home 就在根数据集里，根流已经包含它。
+        msg "未发现独立数据集 ${HOME_SNAP_TARGET}：/home 在根流内" \
+            "No separate dataset $HOME_SNAP_TARGET: /home is inside the root stream"
+        _include_home=0
+        _home_in_root=1
+    fi
+
     # --- 解析目标 ---
-    if [ -d "$_dest" ]; then
+    # 目录模式：两个流 + manifest（默认，唯一能完整备份的形态）。
+    # 文件模式：只放一个流，必须显式 --root-only。
+    _dest_is_dir=0
+    [ -d "$_dest" ] && _dest_is_dir=1
+    if [ "$_dest_is_dir" = "1" ]; then
         if [ "$_compress" = "1" ]; then
             _suffix=".zfs.gz"
         else
             _suffix=".zfs"
         fi
-        _base="$(printf '%s' "$SNAP_TARGET" | tr '/' '-')"
-        _dest="${_dest%/}/${_base}-${_snap}-$(date +%Y%m%d-%H%M%S)${_suffix}"
+        _ts="$(date +%Y%m%d-%H%M%S)"
+        _root_base="$(printf '%s' "$SNAP_TARGET" | tr '/' '-')"
+        _dest="${_dest%/}/${_root_base}-${_snap}-${_ts}${_suffix}"
+        # 两个流，或 /home 本就在根流里（无独立数据集）时写 manifest：
+        # 它是「这套备份包含什么」的唯一对账依据。单流（--root-only）不写。
+        _manifest=""
+        if [ "$_include_home" = "1" ] || [ "$_home_in_root" = "1" ]; then
+            _manifest="${_dest%/*}/backup-${_ts}.manifest"
+        fi
+        _home_dest=""
+        if [ "$_include_home" = "1" ] && [ -n "$_home_snap" ]; then
+            _home_base="$(printf '%s' "$HOME_SNAP_TARGET" | tr '/' '-')"
+            _home_dest="${_dest%/*}/${_home_base}-${_home_snap}-${_ts}${_suffix}"
+        fi
+    elif [ "$_include_home" = "1" ]; then
+        err "目标不是目录：$_dest" "Destination is not a directory: $_dest"
+        err "  默认备份要放两个流（根 + /home），单文件只能装一个。" \
+            "  The default backup writes two streams (root + /home); one file holds one."
+        err "  要找目录就传一个已存在的目录；只发根流请显式加 --root-only。" \
+            "  Pass an existing directory, or add --root-only for the root stream alone."
+        exit 1
     else
         case "$_dest" in
             */)
@@ -207,20 +341,26 @@ cmd_send() {
                 exit 1
                 ;;
         esac
+        _manifest=""
+        _home_dest=""
     fi
 
     _part="${_dest}.part"
 
     # --- 覆盖保护（默认拒绝，--force 才放行）---
-    if [ -e "$_dest" ] && [ "$_force" != "1" ]; then
-        err "目标已存在，拒绝覆盖：$_dest" "Destination exists, refusing to overwrite: $_dest"
-        err "  确需覆盖请显式加 --force" "  pass --force to overwrite"
-        exit 1
+    _exists=""
+    if [ -e "$_dest" ]; then _exists="$_dest"; fi
+    if [ -e "$_part" ]; then _exists="$_part"; fi
+    if [ -n "$_home_dest" ]; then
+        if [ -e "$_home_dest" ]; then _exists="$_home_dest"; fi
+        if [ -e "$_home_dest.part" ]; then _exists="$_home_dest.part"; fi
     fi
-    if [ -e "$_part" ] && [ "$_force" != "1" ]; then
-        err "残留的临时文件：$_part" "Leftover temporary file: $_part"
-        err "  可能来自一次中断的备份；确认无并发备份后加 --force 覆盖" \
-            "  likely from an interrupted backup; use --force if no other backup is running"
+    if [ -n "$_manifest" ] && [ -e "$_manifest" ]; then
+        _exists="$_manifest"
+    fi
+    if [ -n "$_exists" ] && [ "$_force" != "1" ]; then
+        err "目标已存在，拒绝覆盖：$_exists" "Destination exists, refusing to overwrite: $_exists"
+        err "  确需覆盖请显式加 --force" "  pass --force to overwrite"
         exit 1
     fi
 
@@ -236,7 +376,7 @@ cmd_send() {
 
     # 歧义提示：不存在的无扩展名路径会被当成文件（例如把未挂载的 /mnt/usb 当目录）。
     # 不拒绝——文件名可以合法地没有点——但必须让用户看见这个解释。
-    if [ ! -e "$_dest" ]; then
+    if [ "$_dest_is_dir" = "0" ] && [ ! -e "$_dest" ]; then
         case "${_dest##*/}" in
             *.*) ;;
             *)
@@ -264,7 +404,7 @@ cmd_send() {
             ;;
     esac
 
-    # --- 空间预检 ---
+    # --- 空间预检（两个流的 refer 之和）---
     # refer 是「数据集引用的逻辑字节数」（-p 取精确数字，避免解析 1.2G 这种字符串）。
     # 实际发送的是压缩后的流（ZFS 自身压缩 + gzip），所以这是偏保守的上界；
     # 偏保守的方向是安全的：宁可拒绝，不要在写到一半时把目标盘撑爆。
@@ -272,6 +412,17 @@ cmd_send() {
     case "$_est_bytes" in
         ''|*[!0-9]*) _est_bytes="" ;;
     esac
+    if [ -n "$_home_snap" ] && [ "$_include_home" = "1" ]; then
+        _home_est="$(zfs get -H -p -o value refer "$HOME_SNAP_TARGET@$_home_snap" 2>/dev/null || true)"
+        case "$_home_est" in
+            ''|*[!0-9]*) _home_est="" ;;
+        esac
+        if [ -n "$_est_bytes" ] && [ -n "$_home_est" ]; then
+            _est_bytes=$((_est_bytes + _home_est))
+        else
+            _est_bytes=""
+        fi
+    fi
     _free_kb="$(df -Pk "$_dir" 2>/dev/null | awk 'NR==2 {print $4}')"
     case "$_free_kb" in
         ''|*[!0-9]*) _free_kb="" ;;
@@ -282,8 +433,8 @@ cmd_send() {
         _free_bytes=$((_free_kb * 1024))
         if [ "$_free_bytes" -lt "$_est_bytes" ]; then
             err "空间不足，拒绝备份" "Not enough space, refusing to back up"
-            err "  预计需要（源 refer）：$(human_bytes "$_est_bytes")" \
-                "  estimated need (source refer): $(human_bytes "$_est_bytes")"
+            err "  预计需要（各流 refer 之和）：$(human_bytes "$_est_bytes")" \
+                "  estimated need (sum of stream refers): $(human_bytes "$_est_bytes")"
             err "  目标可用：$(human_bytes "$_free_bytes")" \
                 "  destination free: $(human_bytes "$_free_bytes")"
             exit 1
@@ -298,7 +449,19 @@ cmd_send() {
 
     printf '\n'
     msg "备份 $SNAP_TARGET@$_snap" "Backing up $SNAP_TARGET@$_snap"
+    if [ -n "$_home_dest" ]; then
+        msg "     + $HOME_SNAP_TARGET@$_home_snap" "     + $HOME_SNAP_TARGET@$_home_snap"
+    elif [ "$_root_only" = "1" ]; then
+        msg "  范围：仅根数据集（不含 /home，未写 manifest）" \
+            "  scope: root dataset only (no /home, no manifest)"
+    fi
     msg "  目标：$_dest" "  target: $_dest"
+    if [ -n "$_home_dest" ]; then
+        msg "    $_home_dest" "    $_home_dest"
+    fi
+    if [ -n "$_manifest" ]; then
+        msg "    manifest：$_manifest" "    manifest: $_manifest"
+    fi
     if [ -n "$_est_bytes" ]; then
         msg "  预计大小（源 refer）：$(human_bytes "$_est_bytes")" \
             "  estimated size (source refer): $(human_bytes "$_est_bytes")"
@@ -318,60 +481,70 @@ cmd_send() {
     # 本身就是误操作。不加 --force 时，第二个进程会因 .part 已存在而拒绝。
     if [ "$_force" = "1" ]; then
         rm -f "$_part"
+        [ -n "$_home_dest" ] && rm -f "$_home_dest.part"
     fi
 
-    # --- 发送 ---
-    # POSIX sh 没有 pipefail：`zfs send | gzip` 的退出码只是 gzip 的，
-    # zfs send 中途失败而 gzip 正常结束时会被误判为成功（半截备份被当成完整）。
-    # 所以用状态文件把左端退出码带回来，两端都必须为 0。
-    # 状态文件放 TMPDIR，不污染备份目录（备份目录可能是只读挂载或已写满）。
-    _send_status="${TMPDIR:-/tmp}/ordo-backup-$$.status"
-    rm -f "$_send_status"
-    _rc=0
-    if [ "$_compress" = "1" ]; then
-        { zfs send -v "$SNAP_TARGET@$_snap" || printf '%s\n' "$?" > "$_send_status"; } \
-            | gzip > "$_part" || _rc=$?
-    else
-        zfs send -v "$SNAP_TARGET@$_snap" > "$_part" || _rc=$?
-    fi
-    _send_rc=0
-    if [ -s "$_send_status" ]; then
-        _send_rc="$(_read_status "$_send_status")"
-    fi
-    rm -f "$_send_status"
+    # --- 发送（根流先，/home 流后；任一失败即中止，不留半套）---
+    _send_stream "$SNAP_TARGET@$_snap" "$_dest" "$_compress" || exit 1
+    _root_bytes="$(wc -c < "$_dest" | tr -d ' ')"
+    msg "完成：${_dest}（$(human_bytes "$_root_bytes")）" "Done: $_dest ($(human_bytes "$_root_bytes"))"
 
-    if [ "$_rc" -ne 0 ] || [ "$_send_rc" -ne 0 ]; then
-        err "备份失败（zfs send=$_send_rc, 写入=${_rc}）" \
-            "Backup failed (zfs send=$_send_rc, write=$_rc)"
-        rm -f "$_part"
-        err "  已删除半成品 $_part" "  removed partial file $_part"
-        exit 1
+    _home_bytes=0
+    if [ -n "$_home_dest" ]; then
+        if ! _send_stream "$HOME_SNAP_TARGET@$_home_snap" "$_home_dest" "$_compress"; then
+            # 根流已落盘，但它本来就不是完整备份；删掉以免被当成可用的整套。
+            rm -f "$_dest"
+            err "已删除只有根流的 ${_dest}：它不含 /home，不能当作完整备份" \
+                "Removed root-only $_dest: it has no /home and is not a complete backup"
+            exit 1
+        fi
+        _home_bytes="$(wc -c < "$_home_dest" | tr -d ' ')"
+        msg "完成：${_home_dest}（$(human_bytes "$_home_bytes")）" \
+            "Done: $_home_dest ($(human_bytes "$_home_bytes"))"
     fi
 
-    if [ ! -s "$_part" ]; then
-        err "备份文件为空（异常）" "Backup file is empty (unexpected)"
-        rm -f "$_part"
-        exit 1
+    # --- manifest：两个流的唯一对账依据，verify 靠它知道「这套备份包含什么」---
+    if [ -n "$_manifest" ]; then
+        {
+            printf '# ordo backup manifest v1\n'
+            printf '# 一行一个 <key> <value>；文件名相对本目录。\n'
+            printf 'created %s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)"
+            printf 'pool %s\n' "${SNAP_TARGET%%/*}"
+            printf 'root_snapshot %s@%s\n' "$SNAP_TARGET" "$_snap"
+            printf 'root_file %s\n' "${_dest##*/}"
+            printf 'root_size %s\n' "$_root_bytes"
+            if [ "$_home_in_root" = "1" ]; then
+                printf 'home_in_root yes\n'
+            fi
+            if [ -n "$_home_dest" ]; then
+                printf 'home_snapshot %s@%s\n' "$HOME_SNAP_TARGET" "$_home_snap"
+                printf 'home_file %s\n' "${_home_dest##*/}"
+                printf 'home_size %s\n' "$_home_bytes"
+            fi
+        } > "$_manifest.tmp.$$" || {
+            err "manifest 写入失败：$_manifest" "Cannot write manifest: $_manifest"
+            rm -f "$_manifest.tmp.$$"
+            exit 1
+        }
+        mv -f "$_manifest.tmp.$$" "$_manifest"
+        chmod 644 "$_manifest"
+        msg "范围清单：$_manifest" "Manifest: $_manifest"
     fi
 
-    # --- 原子落盘：同一目录内的 mv 是 rename，不会留下半截 ---
-    if ! mv -f "$_part" "$_dest"; then
-        err "重命名失败，半成品保留在 $_part" "Rename failed; partial file kept at $_part"
-        exit 1
+    # 记录放在最后：只有「完整的一套」才进备份记录，避免日志里留下
+    # 指向已删除半套备份的条目。
+    record_backup "$SNAP_TARGET@$_snap" "$_root_bytes" "$_dest"
+    if [ -n "$_home_dest" ]; then
+        record_backup "$HOME_SNAP_TARGET@$_home_snap" "$_home_bytes" "$_home_dest"
     fi
-
-    _bytes="$(wc -c < "$_dest" | tr -d ' ')"
-    record_backup "$_snap" "$_bytes" "$_dest"
 
     printf '\n'
-    msg "完成：$_dest" "Done: $_dest"
-    msg "  大小：$(human_bytes "$_bytes")（${_bytes} 字节）" \
-        "  size: $(human_bytes "$_bytes") (${_bytes} bytes)"
-    msg "  建议验证：$PROG verify $_dest" "  verify with: $PROG verify $_dest"
+    msg "  建议验证：$PROG verify ${_manifest:-$_dest}" \
+        "  verify with: $PROG verify ${_manifest:-$_dest}"
 }
 
 # ---------------------------------------------------------------------------
-# list — 可备份的快照 + 最近备份记录
+# list — 可备份的快照（根 + /home）+ 最近备份记录
 # ---------------------------------------------------------------------------
 cmd_list() {
     warn_if_identity_drift
@@ -390,8 +563,31 @@ cmd_list() {
     printf '%s\n' "$_names" | while IFS= read -r _full; do
         [ -z "$_full" ] && continue
         _s="${_full#*@}"
-        printf '    %-42s %8s  %s\n' "$_s" "$(snap_used "$_s")" "$(snap_time "$_s")"
+        printf '    %-42s %8s  %s\n' "$_s" "$(snap_used "$SNAP_TARGET" "$_s")" "$(snap_time "$SNAP_TARGET" "$_s")"
     done
+
+    if zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        _hnames="$(zfs list -H -t snapshot -o name -s creation "$HOME_SNAP_TARGET" 2>/dev/null \
+                   | grep "^$HOME_SNAP_TARGET@" | tail -5 || true)"
+        printf '\n'
+        if [ -n "$_hnames" ]; then
+            msg "用户数据快照（${HOME_SNAP_TARGET}，随根一起备份）：" \
+                "Home snapshots ($HOME_SNAP_TARGET, backed up with the root):"
+            printf '%s\n' "$_hnames" | while IFS= read -r _hfull; do
+                [ -z "$_hfull" ] && continue
+                _hs="${_hfull#*@}"
+                printf '    %-42s %8s  %s\n' "$_hs" \
+                    "$(snap_used "$HOME_SNAP_TARGET" "$_hs")" \
+                    "$(snap_time "$HOME_SNAP_TARGET" "$_hs")"
+            done
+        else
+            msg "用户数据快照（${HOME_SNAP_TARGET}）：（无；备份会因此拒绝）" \
+                "Home snapshots ($HOME_SNAP_TARGET): (none; backups will refuse)"
+        fi
+    else
+        msg "未发现独立数据集 ${HOME_SNAP_TARGET}：/home 在根流内" \
+            "No separate dataset $HOME_SNAP_TARGET: /home is inside the root stream"
+    fi
 
     printf '\n'
     msg "最近备份记录（${BACKUP_LOG}）：" "Recent backups ($BACKUP_LOG):"
@@ -401,49 +597,27 @@ cmd_list() {
 # ---------------------------------------------------------------------------
 # verify — gzip 完整性 + zfs receive -n 干跑（绝不写入）
 # ---------------------------------------------------------------------------
-cmd_verify() {
-    _file="${1:-}"
-
-    if [ -z "$_file" ]; then
-        err "需要备份文件路径" "Backup file path required"
-        msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
-        exit 1
-    fi
-    if [ ! -f "$_file" ]; then
-        err "文件不存在：$_file" "File not found: $_file"
-        exit 1
-    fi
-    if [ ! -r "$_file" ]; then
-        err "文件不可读：$_file" "File not readable: $_file"
-        exit 1
-    fi
-
-    require_root "$PROG backup verify $_file"
-
-    _size="$(wc -c < "$_file" | tr -d ' ')"
-    msg "验证 ${_file}（$(human_bytes "$_size")）" "Verifying $_file ($(human_bytes "$_size"))"
-
-    # 干跑接收目标：必须是一个「不存在」的名字（完整流会创建新数据集）。
-    # -n 只解析流、不落盘，所以这个名字永远不会真的出现。
+# 单个流文件的干跑校验。退出码 0 通过 | 1 失败
+_verify_stream() { # 文件 标签
+    _vs_file=$1
+    _vs_label=$2
     _vpool="${SNAP_TARGET%%/*}"
-    _vt="${_vpool}/ordo-verify-dryrun-$(date +%Y%m%d-%H%M%S)"
-    msg "  干跑目标：${_vt}（zfs receive -n，不写入任何数据）" \
-        "  dry-run target: $_vt (zfs receive -n, writes nothing)"
+    _vt="${_vpool}/ordo-verify-dryrun-$(date +%Y%m%d-%H%M%S)-$$"
 
     _vstatus="${TMPDIR:-/tmp}/ordo-verify-$$.status"
     rm -f "$_vstatus"
     _rc=0
     _src_rc=0
 
-    if _is_gzip "$_file"; then
+    if _is_gzip "$_vs_file"; then
         msg "  归档格式：gzip" "  archive: gzip"
         # 同样用状态文件捕获 gzip 的退出码：gzip 的 CRC 错误可能发生在
         # 所有数据已输出之后，此时 zfs receive 仍会返回 0。
-        { gzip -dc "$_file" || printf '%s\n' "$?" > "$_vstatus"; } \
+        { gzip -dc "$_vs_file" || printf '%s\n' "$?" > "$_vstatus"; } \
             | zfs receive -n -v "$_vt" || _rc=$?
     else
         msg "  归档格式：原始 ZFS 流（未压缩）" "  archive: raw ZFS stream (uncompressed)"
-        zfs receive -n -v "$_vt" < "$_file" || _rc=$?
+        zfs receive -n -v "$_vt" < "$_vs_file" || _rc=$?
     fi
 
     if [ -s "$_vstatus" ]; then
@@ -452,17 +626,160 @@ cmd_verify() {
     rm -f "$_vstatus"
 
     if [ "$_rc" -ne 0 ] || [ "$_src_rc" -ne 0 ]; then
-        err "验证失败（解压=$_src_rc, zfs receive=${_rc}）" \
-            "Verification failed (decompress=$_src_rc, zfs receive=$_rc)"
+        err "验证失败（${_vs_label}：解压=$_src_rc, zfs receive=${_rc}）" \
+            "Verification failed ($_vs_label: decompress=$_src_rc, zfs receive=$_rc)"
         err "  文件可能不完整（截断）或已损坏；不要把它当成可用备份" \
             "  the file is likely truncated or corrupt; do not treat it as a usable backup"
+        return 1
+    fi
+    return 0
+}
+
+# manifest 里的单个流：文件存在 + 大小一致 + 可 receive -n。
+_verify_manifest_entry() { # 类型 文件 大小 快照 目录
+    _vme_kind=$1; _vme_file=$2; _vme_size=$3; _vme_snap=$4; _vme_dir=$5
+    _vme_path="$_vme_dir/$_vme_file"
+    if [ ! -f "$_vme_path" ]; then
+        err "缺少流文件：$_vme_path" "Stream file missing: $_vme_path"
+        return 1
+    fi
+    if [ -n "$_vme_size" ]; then
+        _vme_actual="$(wc -c < "$_vme_path" | tr -d ' ')"
+        if [ "$_vme_actual" != "$_vme_size" ]; then
+            err "流大小不符：${_vme_path}（manifest ${_vme_size}，实际 ${_vme_actual}）" \
+                "Stream size mismatch: $_vme_path (manifest $_vme_size, actual $_vme_actual)"
+            return 1
+        fi
+    fi
+    msg "验证 $_vme_kind 流：${_vme_path}（${_vme_snap:-未知快照}）" \
+        "Verifying $_vme_kind stream: $_vme_path (${_vme_snap:-unknown snapshot})"
+    _verify_stream "$_vme_path" "$_vme_kind" || return 1
+    return 0
+}
+
+# manifest 校验：文件存在 + 大小一致 + 每个流可 receive -n。
+# 缺 home 流即判失败：本版承诺的备份是 root + home 两流。
+_verify_manifest() { # manifest 路径
+    _vm_file=$1
+    _vm_dir="$(dirname "$_vm_file")"
+    _vm_bad=0
+
+    if [ ! -r "$_vm_file" ]; then
+        err "manifest 不存在或不可读：$_vm_file" "Manifest missing or unreadable: $_vm_file"
+        return 1
+    fi
+
+    _m_root_file=""
+    _m_root_size=""
+    _m_home_file=""
+    _m_home_size=""
+    _m_root_snap=""
+    _m_home_snap=""
+    _m_home_in_root="no"
+    while IFS=' ' read -r _k _v; do
+        case "$_k" in
+            ''|'#'*) continue ;;
+            root_snapshot) _m_root_snap=$_v ;;
+            root_file)     _m_root_file=$_v ;;
+            root_size)     _m_root_size=$_v ;;
+            home_snapshot) _m_home_snap=$_v ;;
+            home_file)     _m_home_file=$_v ;;
+            home_size)     _m_home_size=$_v ;;
+            home_in_root)  _m_home_in_root=$_v ;;
+        esac
+    done < "$_vm_file"
+
+    if [ -z "$_m_root_file" ]; then
+        err "manifest 缺 root_file：$_vm_file" "Manifest has no root_file: $_vm_file"
+        return 1
+    fi
+
+    if [ "$_m_home_in_root" = "yes" ]; then
+        msg "manifest 声明 /home 在根流内（无独立 home 流）" \
+            "manifest says /home is inside the root stream (no separate home stream)"
+    fi
+
+    _verify_manifest_entry root "$_m_root_file" "$_m_root_size" "$_m_root_snap" "$_vm_dir" || _vm_bad=1
+    if [ -n "$_m_home_file" ]; then
+        _verify_manifest_entry home "$_m_home_file" "$_m_home_size" "$_m_home_snap" "$_vm_dir" || _vm_bad=1
+    elif [ "$_m_home_in_root" != "yes" ]; then
+        err "manifest 缺 home 流：这套备份不含 /home（旧版单流备份）" \
+            "Manifest has no home stream: this backup excludes /home (legacy single-stream)"
+        _vm_bad=1
+    fi
+
+    [ "$_vm_bad" -eq 0 ] || return 1
+    return 0
+}
+
+cmd_verify() {
+    _file="${1:-}"
+
+    if [ -z "$_file" ]; then
+        err "需要备份文件、manifest 或目录" "Backup file, manifest or directory required"
+        msg "运行 '$PROG --help' 查看用法" "Run '$PROG --help' for usage"
         exit 1
     fi
+    if [ ! -e "$_file" ]; then
+        err "路径不存在：$_file" "Path not found: $_file"
+        exit 1
+    fi
+    if [ ! -r "$_file" ]; then
+        err "路径不可读：$_file" "Path not readable: $_file"
+        exit 1
+    fi
+
+    require_root "$PROG backup verify $_file"
+
+    if [ -d "$_file" ]; then
+        # 目录：取最新的 manifest。旧版单流备份没有 manifest，给出明确指引。
+        _latest="$(ls -1 "$_file"/*.manifest 2>/dev/null | LC_ALL=C sort | tail -1 || true)"
+        if [ -z "$_latest" ]; then
+            err "目录里没有 manifest：$_file" "No manifest in directory: $_file"
+            err "  旧版单流备份请直接给文件路径；本版 send 会写 manifest" \
+                "  for legacy single-stream backups pass the file itself; this version writes a manifest"
+            exit 1
+        fi
+        msg "验证备份集：$_latest" "Verifying backup set: $_latest"
+        _verify_manifest "$_latest" || exit 1
+        printf '\n'
+        msg "验证通过：manifest 内所有流可接收，归档完整性校验通过" \
+            "Verification passed: every stream in the manifest is receivable and intact"
+        return 0
+    fi
+
+    case "$_file" in
+        *.manifest)
+            _size="$(wc -c < "$_file" | tr -d ' ')"
+            msg "验证备份集 ${_file}（manifest，$(human_bytes "$_size")）" \
+                "Verifying backup set $_file (manifest, $(human_bytes "$_size"))"
+            _verify_manifest "$_file" || exit 1
+            printf '\n'
+            msg "验证通过：manifest 内所有流可接收，归档完整性校验通过" \
+                "Verification passed: every stream in the manifest is receivable and intact"
+            return 0
+            ;;
+    esac
+
+    _size="$(wc -c < "$_file" | tr -d ' ')"
+    msg "验证 ${_file}（$(human_bytes "$_size")）" "Verifying $_file ($(human_bytes "$_size"))"
+
+    # 干跑接收目标：必须是一个「不存在」的名字（完整流会创建新数据集）。
+    # -n 只解析流、不落盘，所以这个名字永远不会真的出现。
+    # 提示：同目录若有 manifest，交给 manifest 校验（能同时核对两个流）。
+    _sibling="$(ls -1 "$(dirname "$_file")"/*.manifest 2>/dev/null | LC_ALL=C sort | tail -1 || true)"
+    if [ -n "$_sibling" ]; then
+        msg "  同目录有 manifest：${_sibling}（verify 该目录可核对整套备份）" \
+            "  a manifest exists in the same directory: $_sibling (verify the directory for the whole set)"
+    fi
+
+    _verify_stream "$_file" "single" || exit 1
 
     printf '\n'
     msg "验证通过：ZFS 流结构可接收，归档完整性校验通过" \
         "Verification passed: ZFS stream is receivable, archive integrity verified"
     msg "  恢复方法（示例，接收为新数据集）：" "  to restore (example, as a new dataset):"
+    _vpool="${SNAP_TARGET%%/*}"
     if _is_gzip "$_file"; then
         msg "    gzip -dc $_file | zfs receive ${_vpool}/restored" \
             "    gzip -dc $_file | zfs receive ${_vpool}/restored"
@@ -480,7 +797,12 @@ cmd_status() {
 
     _cnt="$(zfs list -H -t snapshot -o name "$SNAP_TARGET" 2>/dev/null \
             | grep -c "^$SNAP_TARGET@" || true)"
-    _newest="$(latest_snapshot)"
+    _newest="$(latest_snapshot "$SNAP_TARGET")"
+    _home_cnt=0
+    if zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        _home_cnt="$(zfs list -H -t snapshot -o name "$HOME_SNAP_TARGET" 2>/dev/null \
+                     | grep -c "^$HOME_SNAP_TARGET@" || true)"
+    fi
 
     msg "备份状态" "Backup status"
     printf '\n'
@@ -490,13 +812,22 @@ cmd_status() {
             "  canonical name: $DATASET (not running; not used as source)"
     fi
     if [ -n "$_newest" ]; then
-        msg "  快照数：  ${_cnt}（最新 ${_newest}，$(snap_time "$_newest")）" \
-            "  snapshots: $_cnt (newest $_newest, $(snap_time "$_newest"))"
+        msg "  快照数：  ${_cnt}（最新 ${_newest}，$(snap_time "$SNAP_TARGET" "$_newest")）" \
+            "  snapshots: $_cnt (newest $_newest, $(snap_time "$SNAP_TARGET" "$_newest"))"
     else
         msg "  快照数：  0（没有可备份的内容）" "  snapshots: 0 (nothing to back up)"
     fi
-    msg "  发送模式：单数据集 zfs send（不带 -R；$HOME_DATASET 不在内）" \
-        "  send mode: single-dataset zfs send (no -R; $HOME_DATASET not included)"
+    if zfs list -H -o name "$HOME_SNAP_TARGET" >/dev/null 2>&1; then
+        msg "  用户数据：${HOME_SNAP_TARGET}（快照 ${_home_cnt} 个，默认随根一起备份）" \
+            "  user data: $HOME_SNAP_TARGET ($_home_cnt snapshots; backed up with the root by default)"
+    else
+        msg "  用户数据：未发现独立数据集 ${HOME_SNAP_TARGET}（/home 在根流内）" \
+            "  user data: no separate dataset $HOME_SNAP_TARGET (/home is inside the root stream)"
+    fi
+    msg "  发送模式：默认两个流（根 + /home），各自单数据集发送；--root-only 只发根" \
+        "  send mode: two streams by default (root + /home), each single-dataset; --root-only for root alone"
+    msg "  范围清单：目录目标会写 backup-<时间戳>.manifest（verify 用它核对整套）" \
+        "  manifest: directory targets get backup-<timestamp>.manifest (verify uses it)"
     msg "  压缩：    默认 gzip（--no-compress 可关闭）" \
         "  compression: gzip by default (--no-compress to disable)"
     msg "  原子写入：<目标>.part → 成功后 mv" "  atomic write: <target>.part -> mv on success"

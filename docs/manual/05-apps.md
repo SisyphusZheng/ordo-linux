@@ -44,6 +44,37 @@ Luciole 不在应用清单里：它是系统层的 `gui-apps/luciole`（见 `con
 
 可选应用在 `config/apps.d/01-optional.list`，按需 `ordo app install`。
 
+## 查看器与默认关联
+
+新用户的 `~/.config/mimeapps.list` 由 `/etc/skel` 预置，打开 PDF、图片、视频
+会落到下表的 Flatpak 应用：
+
+| 内容 | 默认应用 | Flatpak id |
+|---|---|---|
+| PDF / 文档 | Papers | `org.gnome.Papers` |
+| 图片 | Loupe | `org.gnome.Loupe` |
+| 视频 | mpv | `io.mpv.Mpv` |
+
+先安装应用，默认关联才会生效：
+
+```sh
+ordo app install org.gnome.Papers
+ordo app install org.gnome.Loupe
+ordo app install io.mpv.Mpv
+```
+
+旧 home 没有这份文件时手动补一次：
+
+```sh
+install -Dm644 /etc/skel/.config/mimeapps.list ~/.config/mimeapps.list
+```
+
+## 打印与扫描
+
+当前**不支持**打印与扫描：系统层没有 CUPS/SANE，Flatpak 应用也没有可用的打印
+后端。需要时先在 issue 里提出，不要自行 `emerge` 后忘记同步 `config/world`
+（`ordo doctor` 会报漂移）。
+
 ## 更新应用
 
 Flatpak 应用由 `/etc/cron.weekly/flatpak-update` 每周自动更新

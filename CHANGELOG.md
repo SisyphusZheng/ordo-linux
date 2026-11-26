@@ -5,6 +5,17 @@
 
 ## [Unreleased]
 
+### Added
+- `ordo doctor` 增加运行时判据：`secret-tool` store/lookup 往返（缺工具或无会话
+  总线为无法判定，往返失败为问题）、`portals.conf` 三项后端与
+  `busctl --user introspect`、sysklogd 运行状态、外接盘睡眠策略、维护 cron、
+  wezterm 配置属主。
+- 新增 `config/desktop/portals.conf`：FileChooser / Screenshot / ScreenCast
+  指向 umbriel，其余走 gtk；会话入口每次登录落用户级副本，M2 安装器落系统级
+  `/etc/xdg-desktop-portal/portals.conf`。
+- `config/apps.d/01-optional.list` 补 Papers / Loupe / mpv；
+  `config/desktop/skel/.config/mimeapps.list` 预置 PDF、图片、视频默认关联。
+
 ### Changed
 - 恢复 Secret Service：新增 `app-crypt/gnome-keyring`，`app-crypt/libsecret` 回到
   Gentoo 树内版本，删除本地 libsecret overlay 与 `gnome-keyring` /
@@ -16,7 +27,19 @@
 - 收回偏离「libsecret 客户端与 Secret Service 分开安装」；Noctalia 网络面板可
   跨会话保存 Wi-Fi 密码，`ordo-wifi` 降级为旧镜像兜底。
 - `config/desktop/keyring-policy.sh check` 改为验证声明与接线（world、mask、
-  PAM、会话启动），`configure` 只做幂等声明收敛，`remove` 改为 no-op 提示。
+  PAM、会话启动），有会话总线时补 `secret-tool` 往返；`configure` 只做幂等
+  声明收敛，`remove` 改为 no-op 提示。
+- 输入法环境删除 `QT_IM_MODULE=fcitx`：Qt 的 Wayland 插件走 text-input-v3，
+  `fcitx-qt` 未安装；`GTK_IM_MODULE=wayland`、`XMODIFIERS`、`SDL_IM_MODULE`
+  保持不变。04/08/README 收敛为一张变量表，X11 改由 Umbriel 内置 XWayland 承载。
+- Noctalia 番茄钟插件不再硬挂：`[plugins] enabled = []`，bar 不再引用
+  `thepunkoff/pomodoro:widget`；联网装好插件后按配置注释手动启用。
+
+### Fixed
+- 旧镜像的 `~/.config/wezterm/wezterm.lua` 软链由会话入口落成用户可写副本，
+  `ordo doctor` 增加属主/可写判据，02 手册补一次性检查步骤。
+- 08 手册补 syslog、睡眠策略、池 suspended、维护 cron、密钥服务、
+  storage-key 与 wezterm 权限的排查入口；门户与输入法说法改为与实现一致。
 
 ## [0.1.0] — 产品候选版
 

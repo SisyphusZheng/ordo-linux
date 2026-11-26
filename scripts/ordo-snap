@@ -7,6 +7,7 @@
 #   ordo snap delete <名字>            删除快照
 #   ordo snap rollback <名字>          回滚：clone+promote+切 bootfs，重启后生效
 #   ordo snap auto on|off|status      定时快照开关 / 状态
+#   ordo snap cleanup-build           清理构建/验收期临时数据集（config/dataset 声明）
 #   ordo snap identity                显示当前运行的数据集 vs 规范名
 #
 # 快照分类：
@@ -134,12 +135,12 @@ list_snapshots() {
                     | sed "s|^$HOME_SNAP_TARGET@||" || true)
         printf '\n'
         if [ -z "$_home_all" ]; then
-            msg "用户数据快照（$HOME_SNAP_TARGET）：（无）" \
+            msg "用户数据快照（${HOME_SNAP_TARGET}）：（无）" \
                 "Home snapshots ($HOME_SNAP_TARGET): (none)"
             msg "  提示：doas ordo snap create 或 ordo snap auto on" \
                 "  Hint: doas ordo snap create, or ordo snap auto on"
         else
-            msg "用户数据快照（$HOME_SNAP_TARGET）：" "Home snapshots ($HOME_SNAP_TARGET):"
+            msg "用户数据快照（${HOME_SNAP_TARGET}）：" "Home snapshots ($HOME_SNAP_TARGET):"
             printf '%s\n' "$_home_all" | tail -10 | while IFS= read -r _hs; do
                 [ -z "$_hs" ] && continue
                 printf '    %-42s %8s  %s\n' "$_hs" \
@@ -364,6 +365,114 @@ rollback_snapshot() {
         "  (note: after B, ${DATASET} still does not exist; doctor will flag identity drift)"
 }
 
+# cleanup-build — 销毁构建/验收期的临时数据集（A7 / D3-5）
+#
+# 候选来自 config/dataset：BUILD_DATASETS（空格分隔 glob）与 TEST_BE。
+# 交付镜像里曾带着 80G 构建残留与占 18% 空间的测试 BE：它们不属于发行布局，
+# 但没有任何命令能安全地清掉（手工 zfs destroy 需要先自己判断 bootfs）。
+#
+# 安全判据（顺序即契约）：先读候选涉及的每个池的 bootfs，
+# bootfs 落在任一候选里就整体拒绝——正在被引导的 BE 不能销毁。
+#
+# 退出码：0 已清理/无需清理 | 1 拒绝或销毁失败 | 2 无法判定
+cleanup_build() {
+    require_root "$PROG cleanup-build"
+
+    _dry=0
+    case "${1:-}" in
+        '') ;;
+        --dry-run) _dry=1 ;;
+        *)  err "未知参数：$1（cleanup-build [--dry-run]）" \
+                "Unknown argument: $1 (cleanup-build [--dry-run])"
+            exit 1 ;;
+    esac
+
+    command -v zfs >/dev/null 2>&1 || {
+        err "找不到 zfs，无法列出数据集" "zfs not found; cannot list datasets"
+        exit "$ORDO_EXIT_UNKNOWN"
+    }
+    command -v zpool >/dev/null 2>&1 || {
+        err "找不到 zpool，无法确认 bootfs" "zpool not found; cannot check bootfs"
+        exit "$ORDO_EXIT_UNKNOWN"
+    }
+
+    _all=$(zfs list -H -o name) || {
+        err "无法列出数据集（zfs list 失败）" "zfs list failed"
+        exit "$ORDO_EXIT_BAD"
+    }
+
+    _cands=""
+    for _ds in $_all; do
+        ordo_is_ephemeral_dataset "$_ds" && _cands="$_cands $_ds"
+    done
+
+    if [ -z "$_cands" ]; then
+        msg "没有需要清理的构建残留（BUILD_DATASETS / TEST_BE 均不存在）" \
+            "No build residue to clean (BUILD_DATASETS / TEST_BE absent)"
+        return 0
+    fi
+
+    # 候选涉及的池（去重）
+    _pools=""
+    for _ds in $_cands; do
+        _p=${_ds%%/*}
+        case " $_pools " in
+            *" $_p "*) ;;
+            *) _pools="$_pools $_p" ;;
+        esac
+    done
+
+    # 【关键顺序】bootfs 判据必须在任何 destroy 之前完成。
+    for _p in $_pools; do
+        _bootfs=$(zpool get -H -o value bootfs "$_p" 2>/dev/null) || {
+            err "无法读取池 $_p 的 bootfs" "Cannot read bootfs of pool $_p"
+            exit "$ORDO_EXIT_UNKNOWN"
+        }
+        if ordo_is_ephemeral_dataset "$_bootfs"; then
+            err "拒绝清理：池 $_p 的 bootfs 指向临时数据集 $_bootfs" \
+                "Refusing to clean: pool $_p boots from ephemeral dataset $_bootfs"
+            msg "  先切回发行 BE：zpool set bootfs=$DATASET ${_p}，重启后再清理" \
+                "  switch back first: zpool set bootfs=$DATASET $_p, reboot, then clean"
+            exit "$ORDO_EXIT_BAD"
+        fi
+    done
+
+    msg "构建残留清理（$([ "$_dry" = 1 ] && echo dry-run || echo 销毁)）" \
+        "Build residue cleanup ($([ "$_dry" = 1 ] && echo dry-run || echo destroy))"
+    printf '\n'
+
+    _fail=0
+    for _ds in $_cands; do
+        # 祖先也在候选里时跳过：父数据集带 -r 销毁会把子集一并带走，
+        # 先删父再删子会报 "dataset does not exist"。
+        _nested=0
+        for _other in $_cands; do
+            [ "$_other" = "$_ds" ] && continue
+            case "$_ds" in "$_other"/*) _nested=1; break ;; esac
+        done
+        [ "$_nested" = "1" ] && continue
+
+        if [ "$_dry" = "1" ]; then
+            printf '  将销毁 %s\n' "$_ds"
+            continue
+        fi
+        if zfs destroy -r "$_ds"; then
+            msg "  ✔ 已销毁 $_ds" "  ✔ destroyed $_ds"
+        else
+            err "  ✘ 销毁失败：$_ds" "  ✘ destroy failed: $_ds"
+            _fail=1
+        fi
+    done
+
+    [ "$_fail" -eq 0 ] || exit "$ORDO_EXIT_BAD"
+    if [ "$_dry" = "1" ]; then
+        msg "dry-run：未做任何变更" "dry-run: nothing changed"
+    else
+        msg "完成：构建残留已清理" "Done: build residue cleaned"
+    fi
+    return 0
+}
+
 auto_control() {
     _sub="${1:-status}"
     _cronfile="/etc/cron.d/ordo-snapshot"
@@ -371,43 +480,15 @@ auto_control() {
     case "$_sub" in
         on)
             require_root "$PROG $*"
-            if ! command -v crond >/dev/null 2>&1 && ! command -v cron >/dev/null 2>&1; then
-                err "未安装 cron 守护进程" "No cron daemon found"
-                err "  doas emerge sys-process/cronie" "  doas emerge sys-process/cronie"
-                err "  doas rc-update add cronie default" "  doas rc-update add cronie default"
-                exit 1
-            fi
-            # 二进制在 ≠ 服务会跑。旧版只查二进制，于是"写了 cron 却永不执行"
-            # 也能返回成功。这里补查 runlevel，并顺手注册（幂等）。
-            if command -v rc-update >/dev/null 2>&1; then
-                if ! rc-update show default 2>/dev/null | grep -q '^[[:space:]]*cronie'; then
-                    if rc-update add cronie default >/dev/null 2>&1; then
-                        msg "  已把 cronie 加入 default runlevel" \
-                            "  Added cronie to the default runlevel"
-                    else
-                        err "cronie 未在 default runlevel，且注册失败 —— 定时快照不会执行" \
-                            "cronie not in default runlevel and could not be added"
-                        exit 1
-                    fi
-                fi
+            # 快照 cron 与每月 scrub 的文本归 scripts/ordo-maintenance：
+            # 安装器与这里的启用动作共用一个装配入口，写出的文件一字不差。
+            if [ -x "$_here/ordo-maintenance" ]; then
+                "$_here/ordo-maintenance" enable || exit $?
             else
-                err "找不到 rc-update，无法确认 cronie 是否随开机启动" \
-                    "rc-update not found; cannot confirm cronie starts at boot"
-                exit 1
+                err "找不到 $_here/ordo-maintenance（scripts/ 不完整）" \
+                    "Cannot find $_here/ordo-maintenance (incomplete scripts/)"
+                exit "$ORDO_EXIT_BAD"
             fi
-            mkdir -p /etc/cron.d
-            # 与 install.sh §16 生成的 cron 保持一字不差：
-            # 缺 SHELL/PATH 时 cron 用极简环境，脚本里的 zfs 可能不在 PATH 上。
-            cat > "$_cronfile" << 'CRON'
-# ordo 定时快照：每小时一次，分档保留（24 小时 / 7 天 / 4 周）
-# 由 ordo-snap-auto 执行，对象是 RUNNING_ROOT（回滚后也对）
-SHELL=/bin/sh
-PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/sbin
-17 * * * * root /usr/local/bin/ordo-snap-auto >/dev/null 2>&1
-CRON
-            chmod 644 "$_cronfile"
-            msg "定时快照已启用（每小时，保留 24 小时 / 7 天 / 4 周 三档）" \
-                "Auto snapshot enabled (hourly; keeps 24h / 7d / 4w tiers)"
             ;;
         off)
             require_root "$PROG $*"
@@ -521,7 +602,7 @@ restore_from_snapshot() {
     _zp="$_mnt/.zfs/snapshot/$_snap_name"
     [ -d "$_zp" ] || {
         err "找不到快照可读视图：$_zp" "Snapshot view not found: $_zp"
-        err "  检查：zfs get snapdir $_owner（应为 hidden 或 visible）" \
+        err "  检查：zfs get snapdir ${_owner}（应为 hidden 或 visible）" \
             "  Check: zfs get snapdir $_owner (should be hidden or visible)"
         exit 1
     }
@@ -583,6 +664,7 @@ case "$ACTION" in
     rollback|rb) rollback_snapshot "$@" ;;
     restore)     restore_from_snapshot "$@" ;;
     auto)        auto_control "$@" ;;
+    cleanup-build) cleanup_build "$@" ;;
     identity|id) show_identity ;;
     -h|--help|help)
         cat <<EOF
@@ -597,6 +679,7 @@ $PROG — ZFS 快照管理
   rollback <名字>          回滚：clone → promote → 切 bootfs，重启后生效
   restore <快照> <路径>     从快照恢复单个文件/目录（不整体回滚，最常用）
   auto on|off|status      定时快照开关 / 状态（检查 cron + 服务 + 工具三项）
+  cleanup-build [--dry-run]  清理构建/验收期临时数据集（先判 bootfs 不在其中）
   identity                显示「运行中的数据集」vs「配置里的规范名」
 
 示例:

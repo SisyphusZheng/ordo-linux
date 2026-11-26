@@ -35,6 +35,21 @@ if [ -z "${GNOME_KEYRING_CONTROL:-}" ]; then
     ordo_session_activate_environment
 fi
 
+# 门户后端选择：用户级配置优先于 /etc（xdg-desktop-portal 的 XDG 查找规则）。
+# 新装与旧机都在登录时落位，否则文件选择器会落回 gtk，Luciole 不再是选择器。
+_ordo_portals_src="${ORDO_CONF_DIR:-/opt/ordo/config}/desktop/portals.conf"
+_ordo_portals_dst="${XDG_CONFIG_HOME:-$HOME/.config}/xdg-desktop-portal/portals.conf"
+if [ -r "$_ordo_portals_src" ]; then
+    if ! cmp -s "$_ordo_portals_src" "$_ordo_portals_dst" 2>/dev/null; then
+        mkdir -p "${_ordo_portals_dst%/*}" 2>/dev/null || :
+        install -m644 "$_ordo_portals_src" "$_ordo_portals_dst" 2>/dev/null \
+            || printf 'Ordo: 无法部署 portals.conf（%s）\n' "$_ordo_portals_dst" >&2
+    fi
+else
+    printf 'Ordo: 缺少 %s（门户后端可能退回 gtk）\n' "$_ordo_portals_src" >&2
+fi
+unset _ordo_portals_src _ordo_portals_dst
+
 # wezterm 配置按手册要能原地编辑，Noctalia 的 wezterm 模板也会写色名。
 # 旧版 apply / 旧镜像把它软链到 root 只读的 /opt/ordo，实机报
 # "touch wezterm.lua: 权限不够"。会话入口在用户侧把它落成真实副本；

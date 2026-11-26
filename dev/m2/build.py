@@ -53,6 +53,8 @@ def bundle(include_legacy=True):
                      "config/platform/m2/install-native.sh", "config/platform/m2/install-cli.sh",
                      "config/platform/m2/install-hardware.sh", "config/platform/m2/verify-hardware.sh",
                      "config/platform/m2/speakersafetyd.conf",
+                     "config/platform/m2/tune-usb-pool.sh",
+                     "config/platform/m2/zed.d/statechange-ordo.sh",
                      "config/platform/m2/keyboard-light.sh", "config/platform/m2/world", "config/platform/m2/world.base",
                      "config/platform/m2/package.use",
                      "config/platform/m2/package.accept_keywords", "config/platform/m2/asahi.conf",
@@ -66,7 +68,6 @@ def bundle(include_legacy=True):
                      "config/dataset", "config/check-build", "config/zfs-arc.start",
                      "config/migrations/1795594673-m2-desktop-environment.sh",
                      "config/migrations/1795601392-m2-package-defaults.sh",
-                     "config/migrations/1795627149-remove-gnome-keyring.sh",
                      "config/world", "config/world.sh", "config/world.bare-metal",
                      "config/package.use/ordo-keyring",
                      "config/package.use/ordo-storage",
@@ -74,7 +75,8 @@ def bundle(include_legacy=True):
                      "scripts/lib.sh", "scripts/ordo-i18n.sh", "scripts/ordo", "scripts/doctor",
                      "scripts/ordo-config", "scripts/ordo-snap", "scripts/ordo-snap-auto",
                      "scripts/ordo-backup", "scripts/ordo-migrate", "scripts/ordo-selfcheck",
-                     "scripts/ordo-build-manifest", "scripts/ordo-wifi", "scripts/sysup"):
+                     "scripts/ordo-build-manifest", "scripts/ordo-wifi", "scripts/sysup",
+                     "scripts/ordo-maintenance", "scripts/ordo-selfupdate"):
             inputs.append(REPO / name)
         if include_legacy:
             inputs.append(REPO / "dev/m2/display/modules.tar.gz")

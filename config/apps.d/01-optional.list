@@ -7,3 +7,6 @@ org.libreoffice.LibreOffice  # 办公套件
 org.telegram.desktop         # IM
 com.visualstudio.code        # 编辑器（AGENTS.md：编辑器一律 Flatpak）
 org.gimp.GIMP                # 图像处理
+org.gnome.Papers             # PDF/文档查看器（mimeapps 的 application/pdf 默认）
+org.gnome.Loupe              # 图片查看器（mimeapps 的 image/* 默认）
+io.mpv.Mpv                   # 视频播放器（mimeapps 的 video/* 默认）

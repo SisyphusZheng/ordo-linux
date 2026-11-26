@@ -1,0 +1,9 @@
+[Default Applications]
+application/pdf=org.gnome.Papers.desktop
+image/png=org.gnome.Loupe.desktop
+image/jpeg=org.gnome.Loupe.desktop
+image/webp=org.gnome.Loupe.desktop
+image/gif=org.gnome.Loupe.desktop
+video/mp4=io.mpv.Mpv.desktop
+video/x-matroska=io.mpv.Mpv.desktop
+video/webm=io.mpv.Mpv.desktop

@@ -1,0 +1,3 @@
+# Ordo — 充电上限 80%（sysfs 值重启会丢，所以由 udev 在电池出现时重新写入）
+# 内核不提供该属性时 TEST 条件不成立，规则自动跳过。
+ACTION=="add", SUBSYSTEM=="power_supply", KERNEL=="BAT*", TEST{charge_control_end_threshold}=="*", ATTR{charge_control_end_threshold}="80"
