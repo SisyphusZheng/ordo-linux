@@ -102,10 +102,10 @@ SSHD
                 || ordo_die "sshd 配置校验失败（sshd -t -f ${SSH_CONF}）：先修语法再启用"
             rc-update add sshd default >/dev/null 2>&1 \
                 || ordo_die "rc-update add sshd default 失败"
-            if ! rc-service sshd start >/dev/null 2>&1; then
-                rc-service sshd restart >/dev/null 2>&1 \
-                    || ordo_die "sshd 已注册但未能启动（rc-service sshd start 看原因）：SSH 并未开启"
-            fi
+            # 开启语义：start 失败就是失败。不要用 restart 掩盖——否则命令打印
+            # 「已开启」而服务可能从未起来（第四轮复核的探针场景）。
+            rc-service sshd start >/dev/null 2>&1 \
+                || ordo_die "sshd 启动失败（rc-service sshd start 看原因）：SSH 并未开启"
             ordo_ok "SSH 已开启（default runlevel；策略见 ${SSH_DROPIN}）"
             ;;
         off)

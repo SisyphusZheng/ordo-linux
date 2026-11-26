@@ -5,7 +5,7 @@
 #   1. Secret Service 的 PAM/会话接线（旧镜像没有密钥服务，Wi-Fi 密码存不住）；
 #   2. 门户后端与输入法环境（portals.conf / 99imm）；
 #   3. 睡眠策略与唤醒钩子（外接根池禁用合盖睡眠）；
-#   4. 掉盘播报 zedlet、扬声器保护配置与 /run/ordo 权限。
+#   4. 掉盘播报 zedlet、扬声器保护配置，以及 /run/ordo 的 tmpfiles 与 0770 权限。
 #
 # 只从 /opt/ordo 的当前声明部署，不联网、不重装；缺文件就跳过并计数。
 set -eu
@@ -46,6 +46,16 @@ esac
 
 # 4) 掉盘播报 / 扬声器保护 / 运行时目录
 put "$repo/config/platform/m2/zed.d/statechange-ordo.sh" /etc/zfs/zed.d/statechange-ordo.sh 755
+# /run/ordo 每次启动由 tmpfiles 重建为 0770 root:ordo：桌面用户要写标记。
+if [ -f "$repo/config/platform/m2/install-hardware.sh" ]; then
+    _runtime=$(sed -n '/^cat > \/etc\/tmpfiles.d\/ordo-runtime.conf/,/^RUNTIME$/p' \
+        "$repo/config/platform/m2/install-hardware.sh" | sed '1d;$d')
+    if [ -n "$_runtime" ]; then
+        printf '%s\n' "$_runtime" > /etc/tmpfiles.d/ordo-runtime.conf
+        deployed=$((deployed + 1))
+    fi
+fi
+install -d -m 0770 /run/ordo 2>/dev/null && chgrp ordo /run/ordo 2>/dev/null || :
 put "$repo/config/platform/m2/speakersafetyd.conf" /etc/conf.d/speakersafetyd 644
 if [ -f "$repo/config/platform/m2/install-hardware.sh" ] && command -v rc-update >/dev/null 2>&1; then
     rc-update add speakersafetyd default >/dev/null 2>&1 || :

@@ -14,7 +14,7 @@ if [ ! -e /etc/ordo/platform ]; then
 fi
 
 # /run 是 tmpfs，安装期的 mkdir 不会留到下次启动。掉盘标记与扬声器保护标记
-# 都要由会话里的 ordo 用户写，所以用 tmpfiles 在每次启动重建 0750 root:ordo。
+# 都要由会话里的 ordo 用户写，所以用 tmpfiles 在每次启动重建 0770 root:ordo。
 mkdir -p /etc/tmpfiles.d
 cat > /etc/tmpfiles.d/ordo-runtime.conf <<'RUNTIME'
 # Ordo — 运行期共享目录（verify-hardware.sh 以 ordo 用户写标记）

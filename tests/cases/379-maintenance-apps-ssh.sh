@@ -250,6 +250,9 @@ assert_active_line "$_dropin" "PasswordAuthentication yes" "允许用户口令�
 assert_active_line "$_dropin" "KbdInteractiveAuthentication no" "关闭键盘交互认证"
 assert_eq "$(awk -v inc="Include $tmp/ssh/sshd_config.d/*.conf" '$0 == inc {n++} END {print n+0}' "$tmp/ssh/sshd_config")" \
     "1" "sshd_config 补一行 Include（drop-in 才会生效）"
+# OpenSSH 是 first-value-wins：Include 必须是首个非注释行，否则前面的策略会赢。
+assert_eq "$(awk 'NF && $1 != "#" {print; exit}' "$tmp/ssh/sshd_config")" \
+    "Include $tmp/ssh/sshd_config.d/*.conf" "Include 位于 sshd_config 首部"
 assert_eq "$(awk '$1 == "add" && $2 == "sshd" {n++} END {print n+0}' "$tmp/rc.log")" "1" \
     "sshd 注册进 default runlevel"
 # 主机密钥必须先于 sshd -t 生成：镜像里没有主机密钥，先校验必然失败。
@@ -284,6 +287,22 @@ rc=0
 SSHD_RC=0 RCS_RC=1 run_ssh on > "$tmp/ssh5" 2> "$tmp/sshe5" || rc=$?
 assert_rc "$rc" 1 "启动失败退出 1"
 assert_contains "$(cat "$tmp/ssh5" "$tmp/sshe5" 2>/dev/null)" "并未开启" "点明 SSH 并未开启"
+
+case_name "A3 缺 rc-update 时 enable 必须 exit 2（不是通过）"
+
+rm -rf "$tmp/norc"; mkdir -p "$tmp/norc"
+for _t in sh install printf cat grep mkdir rm dirname sed awk chmod mv date readlink; do
+    _p="$(command -v "$_t" 2>/dev/null || : )"
+    [ -n "$_p" ] && ln -sf "$_p" "$tmp/norc/$_t"
+done
+# 假 root：用例以普通用户跑，但脚本需要 id -u == 0。
+printf '#!/bin/sh\n[ "$1" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id "$@"\n' > "$tmp/norc/id"
+chmod 755 "$tmp/norc/id"
+mkdir -p "$tmp/cron.d" "$tmp/cron.monthly"
+rc=0
+PATH="$tmp/norc" ORDO_CRON_DIR="$tmp/cron.d" ORDO_CRON_MONTHLY="$tmp/cron.monthly" \
+    sh scripts/ordo-maintenance enable > /dev/null 2>&1 || rc=$?
+assert_rc "$rc" 2 "缺 rc-update 返回 2"
 
 case_name "A8 ordo ssh off：移除策略并停服务（幂等）"
 

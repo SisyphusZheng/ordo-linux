@@ -76,7 +76,8 @@ def bundle(include_legacy=True):
                      "scripts/ordo-config", "scripts/ordo-snap", "scripts/ordo-snap-auto",
                      "scripts/ordo-backup", "scripts/ordo-migrate", "scripts/ordo-selfcheck",
                      "scripts/ordo-build-manifest", "scripts/ordo-wifi", "scripts/sysup",
-                     "scripts/ordo-maintenance", "scripts/ordo-selfupdate"):
+                     "scripts/ordo-maintenance", "scripts/ordo-selfupdate",
+                     "config/platform/m2/udev/90-ordo-charge-threshold.rules"):
             inputs.append(REPO / name)
         if include_legacy:
             inputs.append(REPO / "dev/m2/display/modules.tar.gz")

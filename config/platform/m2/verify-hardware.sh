@@ -122,7 +122,7 @@ gpu() {
     fi
 }
 
-# 扬声器保护缺失标记：install-hardware.sh 用 tmpfiles 建 /run/ordo（root:ordo 0750），
+# 扬声器保护缺失标记：install-hardware.sh 用 tmpfiles 建 /run/ordo（root:ordo 0770），
 # 会话里的 ordo 用户可写。写不进去也不影响检查结论，所以全部尽力而为。
 marker_dir=${ORDO_RUN_DIR:-/run/ordo}
 speaker_missing() {

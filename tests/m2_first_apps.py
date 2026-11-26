@@ -83,6 +83,11 @@ def bundle_contract():
     # 目录本身也要能从 tar 中还原（tar -xzf 会按成员自动建目录）
     assert any(name.startswith("config/apps.d/") for name in names), names
 
+    # 第四轮复核：helper 与充电规则必须真进镜像，否则 M2 上命令不存在/规则落不了位。
+    for required in ("scripts/ordo-maintenance", "scripts/ordo-selfupdate",
+                     "config/platform/m2/udev/90-ordo-charge-threshold.rules"):
+        assert required in names, f"bundle 缺交付物：{required}"
+
 
 def main():
     with tempfile.TemporaryDirectory(prefix="m2-apps-") as raw:
