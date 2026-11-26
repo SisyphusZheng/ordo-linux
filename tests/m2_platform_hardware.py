@@ -9,6 +9,7 @@
 """
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -53,9 +54,11 @@ def run_install_hardware(tmp, platform):
         tool.write_text(body)
         tool.chmod(0o755)
     script = (PLATFORM / "install-hardware.sh").read_text()
-    script = (script.replace('here=$(dirname "$(readlink -f "$0")")', f'here={PLATFORM}')
-              .replace("/etc/", f"{root}/etc/").replace("/usr/", f"{root}/usr/")
-              .replace("/var/", f"{root}/var/").replace("/run/", f"{root}/run/"))
+    # 单趟重写系统前缀：macOS 的临时根位于 /var/folders 下，若先插入根再
+    # 依次 str.replace("/var/", ...)，已插入的根会被二次套根，脚本就写到
+    # $root/$root/etc/... 而不是 $root/etc/...。re.sub 不会重扫替换文本。
+    script = re.sub(r"/(etc|usr|var|run)/", lambda m: f"{root}/{m.group(1)}/", script)
+    script = script.replace('here=$(dirname "$(readlink -f "$0")")', f'here={PLATFORM}')
     runner = tmp / "run.sh"
     runner.write_text("set -eu\n" + script)
     env = {"PATH": f"{bins}:{os.environ['PATH']}"}
@@ -101,7 +104,9 @@ def gpu_reasons():
         body = (body.replace("/sys/class/drm", str(tmp / "drm"))
                     .replace("/dev/dri/", f"{tmp}/dev/")
                     .replace("/proc/", f"{tmp}/proc/")
-                    .replace("[ -c ", "[ -f "))
+                    # 临时目录里造不出字符设备：把「渲染节点必须是字符设备」的
+                    # 判断改成普通文件判断，其余逻辑（驱动绑定、EGL、环境）照跑。
+                    .replace('[ ! -c "$render" ]', '[ ! -f "$render" ]'))
         script = "set -u\n" + body + "\nv=${WAYLAND_DISPLAY:-}; export WAYLAND_DISPLAY=${v:-wayland-0}; gpu"
 
         def run(env=None):

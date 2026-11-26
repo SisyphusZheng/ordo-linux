@@ -19,7 +19,7 @@ FLATPAK = r'''#!/bin/sh
 printf '%s\n' "$*" >> "$FLATPAK_LOG"
 case "$1" in
     remote-add) exit "${REMOTE_STATUS:-0}" ;;
-    list) printf '%s\n' "$INSTALLED" ;;
+    list) printf '%s\n' "$INSTALLED"; exit 0 ;;
     install)
         case "$*" in
             *"$FAIL_APP"*) exit 1 ;;
@@ -112,7 +112,11 @@ def main():
     first = (PLATFORM / "first-desktop.sh").read_text()
     assert 'install -m 755 /opt/ordo/config/platform/m2/first-apps.sh /usr/local/sbin/ordo-first-apps' in first
     assert "/etc/local.d/70-ordo-first-apps.start" in first
-    assert first.index("first-apps.sh") < first.index("rc-update add greetd")
+    # 顺序只对真实依赖成立：先把 ordo-first-apps 落盘，再写 exec 它的 local.d
+    # 入口。greetd 的 rc-update 与首启应用没有依赖（local.d 在 boot 时独立跑），
+    # 拿它当锚点只是把「运行级注册的排版顺序」误当成契约，故改锚到 hook 本身。
+    assert first.index("first-apps.sh") < first.index("70-ordo-first-apps.start")
+    assert "exec /usr/local/sbin/ordo-first-apps" in first
     print("P1-04 first-boot apps: ok")
 
 

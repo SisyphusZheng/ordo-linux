@@ -90,22 +90,20 @@ def display_index_contract():
             (folder / f"{module}.ko").write_bytes(module.encode())
         (tree / "modules.builtin").write_text("kernel/drivers/builtin/builtin.ko\n")
         index = tree / "modules.dep"
-        index.write_text("\n".join([
+        # 覆盖层自带的是按“构建时模块集”生成的依赖索引：其中 builtin 已在
+        # modules.builtin 里、gone 在介质上并不存在，安装后必须按实际成员裁掉。
+        stale_index = "\n".join([
             "kernel/drivers/keep/keep.ko: ",
             "kernel/drivers/builtin/builtin.ko: ",
             "kernel/drivers/gone/gone.ko: ",
-        ]) + "\n")
+        ]) + "\n"
+        index.write_text(stale_index)
         overlay = tmp / "modules.tar.gz"
         with tarfile.open(overlay, "w:gz") as archive:
-            data = b"kernel/drivers/keep/keep.ko: \n"
+            data = stale_index.encode()
             member = tarfile.TarInfo("modules.dep")
             member.size = len(data)
             archive.addfile(member, io.BytesIO(data))
-        (tree / "modules.dep").write_text("\n".join([
-            "kernel/drivers/keep/keep.ko: ",
-            "kernel/drivers/builtin/builtin.ko: ",
-            "kernel/drivers/gone/gone.ko: ",
-        ]) + "\n")
         result = subprocess.run(["sh", str(PLATFORM / "install-display.sh"), tree, overlay],
                                 capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
@@ -149,7 +147,7 @@ def media_check_contract():
 
         (esp / "ordo-kernel" / ("ordo-" + "b" * 24)).mkdir()
         result = run(esp)
-        assert result.returncode == 1 and "没有 extlinux 入口" in result.stderr
+        assert result.returncode == 1 and "没有任何 extlinux 入口" in result.stderr
         (esp / "ordo-kernel" / ("ordo-" + "b" * 24)).rmdir()
 
         (esp / "EFI/BOOT/BOOTAA64.EFI").unlink()

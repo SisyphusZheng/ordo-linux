@@ -3,7 +3,7 @@
 set -eu
 here=$(dirname "$(readlink -f "$0")")
 
-install -d -m 0755 /etc/ordo
+mkdir -p /etc/ordo
 # 只在平台文件缺失时补写：已经写成 m2-native 的机器不能被这一步降级成 m2，
 # 否则 @ordo-m2 包集与 AGX 渲染等待都会悄悄失效（P1-06）。
 if [ ! -e /etc/ordo/platform ]; then

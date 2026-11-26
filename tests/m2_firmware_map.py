@@ -48,7 +48,11 @@ def mapping_contract():
     for source, targets in mapping.items():
         assert len(set(targets)) == len(targets), f"重复请求名：{source}"
         assert targets[0].rsplit("/", 1)[0] == source.rsplit("/", 1)[0], source
-        assert any(target != source for target in targets), f"{source} 没有请求名映射"
+        # 「必须另有请求名」只约束 Wi-Fi（brcmfmac）：内核按板型后缀链请求，
+        # 源名不在链上，映射缺失时整条链路 -2。蓝牙（brcmbt）由 hci_bcm4377
+        # 直接请求源名，target == source 本身就是合法映射，故不在此断言范围内。
+        if source.startswith("brcm/brcmfmac"):
+            assert any(target != source for target in targets), f"{source} 没有请求名映射"
     # 蓝牙沿用源文件名：请求名与源名一致也是合法映射，但必须显式登记
     assert "brcm/brcmbt4387c2-apple,hokkaido-u.bin" in mapping
     return mapping
@@ -95,8 +99,9 @@ def boot_sync_contract(mapping):
             path = firmware / "vendorfw" / source
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"fw:" + source.encode())
-        (firmware / "apple").mkdir(parents=True, exist_ok=True)
-        (firmware / "apple/tpmtfw-j413.bin").write_bytes(b"touch")
+        # Apple 固件包解包在 vendorfw/ 下：boot-sync 对 apple/* 也走 vendorfw 前缀。
+        (firmware / "vendorfw/apple").mkdir(parents=True, exist_ok=True)
+        (firmware / "vendorfw/apple/tpmtfw-j413.bin").write_bytes(b"touch")
         (firmware / "regulatory.db").write_bytes(b"db")
         (firmware / "regulatory.db.p7s").write_bytes(b"sig")
         bins = tmp / "bin"
@@ -121,7 +126,10 @@ def boot_sync_contract(mapping):
                 assert link.is_symlink(), f"{alias} 必须是符号链接（不能复制一份固件）"
                 assert os.readlink(link) == primary.rsplit("/", 1)[-1], alias
                 assert rows[f"usr/lib/firmware/{alias}"] == f"symlink:{primary.rsplit('/', 1)[-1]}"
-        assert not (dest / list(mapping)[0]).exists(), "源文件名不应再作为固件落盘"
+        # 无板型后缀的源名正是内核后缀链的最后一环，所以它本身也是请求名：
+        # 允许出现在 dest，但只能是别名符号链接，不能再落第二份固件副本。
+        source_alias = dest / list(mapping)[0]
+        assert source_alias.is_symlink(), "源文件名只能作为符号链接出现（不能是固件副本）"
         # boot-sync.py 必须认得 symlink 行，否则升级内核时会把别名判成缺失
         source = (PLATFORM / "boot-sync.py").read_text()
         assert 'startswith("symlink:")' in source and "symlinks[name]" in source
@@ -142,8 +150,9 @@ def verify_contract(mapping):
                 path = lib / "vendorfw" / wanted
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fw")
-        body = body.replace('"/opt/ordo/config/platform/m2/wireless-firmware"', f'"{mapfile}"')
-        body = body.replace('"/etc/ordo/wireless-firmware"', f'"{mapfile}"')
+        # 脚本里的候选路径不带引号（for 列表），按裸路径替换到临时映射表。
+        body = body.replace("/opt/ordo/config/platform/m2/wireless-firmware", str(mapfile))
+        body = body.replace("/etc/ordo/wireless-firmware", str(mapfile))
         body = body.replace('"/lib/firmware/', f'"{lib}/')
         script = f"set -u\n{body}\nfirmware_ready"
         assert subprocess.run(["sh", "-c", script]).returncode == 0
