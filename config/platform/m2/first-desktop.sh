@@ -15,16 +15,35 @@ HOME=/home/ordo XDG_CONFIG_HOME=/home/ordo/.config ORDO_CONF_DIR=/opt/ordo/confi
 chown -hR ordo:ordo /home/ordo/.config
 test -r /home/ordo/.config/umbriel/config.toml
 test -r /home/ordo/.config/noctalia/config.toml
-install -d -m 755 /var/lib/ordo
+install -d -m 755 /var/lib/ordo /home/.ordo
+# 首启 marker 在 /home（独立数据集），系统 BE 回滚不会把它带回「未首启」。
+# 旧版放在 /var/lib/ordo（根数据集）：升级时搬过去，否则回滚后还会自动登录一次。
+if [ -e /var/lib/ordo/greetd-first-session ]; then
+    if [ -e /home/.ordo/greetd-first-session ]; then
+        rm -f /var/lib/ordo/greetd-first-session
+    else
+        mv /var/lib/ordo/greetd-first-session /home/.ordo/greetd-first-session
+    fi
+fi
 cat "$src/greetd/config.toml" "$src/greetd/first-boot.toml" > /etc/greetd/config.toml.new
 mv /etc/greetd/config.toml.new /etc/greetd/config.toml
-test ! -e /var/lib/ordo/greetd-first-session
+# 重装幂等：marker 已存在说明首启已完成，保留即可，不能 die（旧版 test ! -e 会中断安装）。
 if [ -d /etc/ordo ] && [ "$(readlink -f /etc/ordo)" != /opt/ordo/config ]; then
     ln -sfn /opt/ordo/config/check-build /etc/ordo/check-build
     ln -sfn /opt/ordo/config/world.sh /etc/ordo/world.sh
 fi
 rc-update add greetd default
 test -L /etc/runlevels/default/greetd
+
+# 【P2-08】用户级 dbus / pipewire 服务要以 user.<用户> 实例进 runlevel 才会被拉起；
+# M2 路径过去只装 /etc/user/runlevels/default/* 软链，从不建实例（install.sh 已有）。
+if [ -f /etc/init.d/user ]; then
+    ln -sfn /etc/init.d/user /etc/init.d/user.ordo
+    rc-update add user.ordo default || { echo "user.ordo 注册失败" >&2; exit 1; }
+else
+    echo "缺少 /etc/init.d/user（openrc 用户服务模板）" >&2
+    exit 1
+fi
 
 # 首启应用清单（P1-04）：M2 路径过去不读 config/apps.d，装完没有浏览器与商店。
 # 安装器不假设联网，只登记 local.d 一次性任务；首启由 ordo 用户装清单里的应用。

@@ -153,9 +153,23 @@ elif [ ! -r /var/lib/portage/world ]; then
     skip "/var/lib/portage/world 不可读，无法检查应用层边界（不是通过）"
 else
     found=0
+    # 先收集 `!` 豁免（P2-09）：旧版在 world 分支把 `!` 行直接 continue 掉，
+    # `app-editors/*` 于是把基线包 nano 也报成越界，与 forbidden-world 的注释
+    # 和 /var/db/pkg 扫描的语义不一致。world 与已安装包共用这张豁免表。
+    _fw_exempt=""
+    while IFS= read -r _fw; do
+        case "$_fw" in
+            ''|\#*) continue ;;
+            \!*)
+                _fw_atom="${_fw#!}"
+                _fw_atom="${_fw_atom%%::*}"
+                _fw_atom="${_fw_atom%%:*}"
+                _fw_exempt="$_fw_exempt $_fw_atom" ;;
+        esac
+    done < "$CONF_DIR/forbidden-world"
     while IFS= read -r pkg; do
         case "$pkg" in ''|\#*|\!*) continue ;; esac
-        if awk -v a="$pkg" '
+        if awk -v a="$pkg" -v exempt="$_fw_exempt" '
             function norm(x) {
                 sub(/[[:space:]]*#.*/, "", x); sub(/^[[:space:]]+/, "", x)
                 sub(/[[:space:]]+$/, "", x)
@@ -163,8 +177,11 @@ else
                 sub(/:.*$/, "", x)       # 剥 :slot
                 return x
             }
+            BEGIN { a = norm(a); n = split(exempt, ex, " ") }
             {
                 b = norm($0)
+                for (i = 1; i <= n; i++)
+                    if (b == ex[i] || (index(b, ex[i]) == 1 && substr(b, length(ex[i])+1, 1) == "-")) next
                 if (a ~ /\/\*$/) { c = a; sub(/\/\*$/, "", c); if (index(b, c "/") == 1) f = 1 }
                 else if (b == a) f = 1
             }
@@ -179,7 +196,20 @@ else
     # 扫 /var/db/pkg 实际安装集，单次 awk 读两份输入，避免逐包 fork。
     # 【P2-09】forbidden-world 必须作为 awk 的第一个文件传入：
     # 只给 -v 变量时 FNR==NR 对每一行都成立，主规则永不执行（旧版假绿灯）。
-    _hits="$(find /var/db/pkg -mindepth 2 -maxdepth 2 -type d 2>/dev/null \
+    # 【P2-09】find 失败 ≠ 没有残留：旧版丢掉 find 的 stderr、管道又吞掉它的
+    # 退出码，扫描失败时 _hits 为空，仍然打 ✔「无应用级大件」。目录缺失或
+    # find 失败一律 skip（exit 2），绝不冒充通过。
+    _pkg_scan=1
+    if [ ! -d /var/db/pkg ]; then
+        skip "/var/db/pkg 不存在，无法检查已安装包（不是通过）"
+        _pkg_scan=0
+    elif ! _pkg_dirs="$(find /var/db/pkg -mindepth 2 -maxdepth 2 -type d 2>/dev/null)"; then
+        skip "find 扫描 /var/db/pkg 失败，无法检查已安装包（不是通过）"
+        _pkg_scan=0
+    fi
+    _hits=""
+    if [ "$_pkg_scan" -eq 1 ]; then
+    _hits="$(printf '%s\n' "$_pkg_dirs" \
         | sed 's|^/var/db/pkg/||' \
         | awk '
             function norm(x) {
@@ -215,6 +245,7 @@ else
                 # 不用 exit：所有禁入包都要报，只报第一个等于漏报。
                 if (hit) print b
             }' "$CONF_DIR/forbidden-world" -)"
+    fi
     if [ -n "$_hits" ]; then
         # 不用管道：管道里的 while 在子 shell 中跑，bad 的 n_bad 计数会丢，
         # 结果打印了 ✘ 却以 0 退出（假绿灯）。这里用 here-doc 留在本 shell。
@@ -225,7 +256,9 @@ $_hits
 EOF
         found=1
     fi
-    if [ "$found" -eq 0 ]; then ok "world 与已安装包均无应用级大件"; fi
+    if [ "$found" -eq 0 ] && [ "$_pkg_scan" -eq 1 ]; then
+        ok "world 与已安装包均无应用级大件"
+    fi
 fi
 
 # 9) Flatpak 应用层 —— 宪法"Flatpak-first"的验收点
@@ -397,6 +430,31 @@ if [ -d /usr/share/wayland-sessions ]; then
     fi
 else
     skip "/usr/share/wayland-sessions 不存在（未安装显示管理器会话？不是通过）"
+fi
+
+# 13.5) M2 硬件自检报告 —— verify-hardware.sh --session-report 的三态结论
+#      必须有人读，否则「硬件已验证」只是产报告那条命令的自我声明（P1-06）。
+#      报告末行是 exit=0/1/2：0 通过、1 异常、2 待验。待验与报告缺失/格式
+#      不认识都只能 skip（exit 2），不得当作通过。只在 j413 设备树上检查，
+#      其它机器不产生这项（报告本来就不该存在）。
+if [ -r /proc/device-tree/compatible ] &&
+   tr '\000' '\n' < /proc/device-tree/compatible | grep -Fxq apple,j413; then
+    _hw_log="${XDG_STATE_HOME:-${HOME:-}/.local/state}/ordo/m2-hardware.log"
+    if [ ! -f "$_hw_log" ]; then
+        skip "没有 M2 硬件自检报告（${_hw_log}；登录桌面后运行 ordo-m2-hardware --session-report，不是通过）"
+    elif [ ! -r "$_hw_log" ]; then
+        skip "M2 硬件自检报告不可读（${_hw_log}；不是通过）"
+    else
+        # 只认**末行**：报告可能包含多段诊断，exit= 是 verify-hardware.sh
+        # 收尾写的结论；取文件里任意一行会被历史残留误导。
+        _hw_last="$(tail -n 1 "$_hw_log" 2>/dev/null || : )"
+        case "$_hw_last" in
+            exit=0) ok "M2 硬件自检通过（最近一次会话）" ;;
+            exit=1) bad "M2 硬件自检报异常（${_hw_log}；重跑 ordo-m2-hardware --session-report 看「异常」项）" ;;
+            exit=2) skip "M2 硬件自检有「待验」项（exit=2 不是通过；重跑 ordo-m2-hardware --session-report）" ;;
+            *) skip "M2 硬件自检报告末行不是可识别的 exit=（不是通过）" ;;
+        esac
+    fi
 fi
 
 # 唯一栈守门：不得同时装两套同类组件（AGENTS.md 硬性约束）。

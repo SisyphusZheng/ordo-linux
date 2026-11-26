@@ -4,8 +4,10 @@ set -eu
 here=$(dirname "$(readlink -f "$0")")
 
 mkdir -p /etc/ordo
-# 只在平台文件缺失时补写：已经写成 m2-native 的机器不能被这一步降级成 m2，
-# 否则 @ordo-m2 包集与 AGX 渲染等待都会悄悄失效（P1-06）。
+# 平台标记只补写、不改写：install-native.sh 在原生包集验完后写 m2-native，
+# 而 first-desktop.sh 在它之后还会再跑本脚本。旧实现按整串比较内容，注释/空白
+# 变体或 vm/bare-metal 标记都会被判成“非 native”并静默改写成 m2。存在即保留：
+# 无法识别的旧标记交给 ordo_world 报 exit 2（无法判定），而不是假装成 M2。
 if [ ! -e /etc/ordo/platform ]; then
     printf 'm2\n' > /etc/ordo/platform.new
     mv -f /etc/ordo/platform.new /etc/ordo/platform

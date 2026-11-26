@@ -248,6 +248,6 @@ ZFS 系统快照。具体机型和验收范围见下表。
 
 ## 许可
 
-代码与 `config/`：**GPL-2.0-or-later**。
-`docs/` 与 `assets/branding/`：**CC BY-SA 4.0**。
-完整文本见 [`licenses/`](licenses/)，划分依据见 [LICENSE-NOTES.md](LICENSE-NOTES.md)。
+代码、构建工具与 `config/`：**GPL-2.0-or-later**（含 `dev/`、`tests/`、`overlay/`）。
+`docs/`、根目录 Markdown、`assets/branding/` 与桌面壁纸：**CC BY-SA 4.0**。
+完整文本见 [`licenses/`](licenses/)，逐路径划分见 [LICENSE-NOTES.md](LICENSE-NOTES.md)。

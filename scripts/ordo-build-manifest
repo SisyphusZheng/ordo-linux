@@ -1,0 +1,146 @@
+#!/bin/sh
+# ordo-build-manifest — 生成 /etc/ordo/build-manifest（P1-02 的唯一生产者）
+#
+# 为什么需要：verify 的期望值必须来自「构建时」，而不是拿运行机 /opt/ordo
+# 里的同一份副本自证（P1-02：world 缺 4 个 atom、会话脚本 1777B、version
+# 三处不一致，旧 verify 照样全绿）。install.sh / M2 外置安装 / VM 装配
+# 三处共用本脚本，格式只在这里定义一次，消费方是 ordo-config 的
+# _verify_build_manifest。
+#
+# 接口：
+#   ordo-build-manifest <安装根> <平台> <架构> [清单路径]
+#     <安装根>    目标系统的根：chroot 内与 VM 装配为 /，外置安装为挂载点
+#     <平台>      vm | bare-metal | m2 | m2-native（原样写进 platform 行）
+#     <架构>      arm64 | amd64（决定登记哪个 world.bare-metal 分片）
+#     [清单路径]  默认 <安装根>/etc/ordo/build-manifest
+#
+# 清单路径一律写「目标系统视角」的绝对路径（/opt/ordo/...、/usr/local/bin/...），
+# 安装根只用于在本机取到文件；调用方换了挂载点也不会污染清单。
+#
+# 格式（空格分隔，逐行；未知行由消费方忽略）：
+#   manifest_version 1
+#   version <version>
+#   platform <平台>
+#   arch <架构>
+#   decl <sha256> <声明副本绝对路径>
+#   copy <sha256> <声明源绝对路径> <部署产物绝对路径>
+#
+# 退出码：0 已写入 | 1 缺声明/写入失败 | 2 无法计算摘要（不是通过）
+
+set -eu
+
+_self="$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")"
+_dir="$(dirname "$_self")"
+# shellcheck source=scripts/lib.sh
+. "$_dir/lib.sh"
+
+die() { printf '!! %s\n' "$*" >&2; exit 1; }
+unknown() { printf '!! %s（退出码 2=无法判定）\n' "$*" >&2; exit 2; }
+
+[ "$#" -ge 3 ] || {
+    printf '用法：ordo-build-manifest <安装根> <平台> <架构> [清单路径]\n' >&2
+    exit 1
+}
+_root=$1
+_platform=$2
+_arch=$3
+
+case "$_platform" in
+    ''|*[!A-Za-z0-9._-]*) die "平台名非法：${_platform:-空}" ;;
+esac
+case "$_arch" in
+    arm64|amd64) ;;
+    *) die "架构必须是 arm64 或 amd64：${_arch:-空}" ;;
+esac
+[ -d "$_root" ] || die "安装根不存在：$_root"
+case "$_root" in
+    /) ;;
+    */) _root=${_root%/} ;;
+esac
+
+if [ "$_root" = / ]; then
+    _default_out=/etc/ordo/build-manifest
+else
+    _default_out="$_root/etc/ordo/build-manifest"
+fi
+_out=${4:-$_default_out}
+
+# 目标系统绝对路径 → 本机可访问路径
+_host() {
+    if [ "$_root" = / ]; then
+        printf '%s\n' "$1"
+    else
+        printf '%s%s\n' "$_root" "$1"
+    fi
+}
+
+# 本机路径 → 目标系统绝对路径（只用于经 _host 拼出来的路径）
+_target() {
+    if [ "$_root" = / ]; then
+        printf '%s\n' "$1"
+    else
+        printf '%s\n' "${1#"$_root"}"
+    fi
+}
+
+# 目标路径 → sha256；摘要工具不可用时退出 2，绝不静默写 0 值。
+_sum() {
+    if _digest=$(ordo_sha256 "$(_host "$1")"); then
+        printf '%s\n' "$_digest"
+    else
+        unknown "无法计算 sha256：$(_host "$1")"
+    fi
+}
+
+_version_file="$(_host /opt/ordo/version)"
+[ -s "$_version_file" ] || die "缺少 $_version_file —— 构建清单无从记录版本"
+_decl_root="$(_host /opt/ordo)"
+
+mkdir -p "$(dirname "$_out")" || die "无法创建清单目录：$(dirname "$_out")"
+_tmp="$_out.tmp.$$"
+trap 'rm -f -- "$_tmp"' EXIT HUP INT TERM
+
+_entries=0
+{
+    printf 'manifest_version 1\n'
+    printf 'version %s\n' "$(cat "$_version_file")"
+    printf 'platform %s\n' "$_platform"
+    printf 'arch %s\n' "$_arch"
+    # 声明文件的装机副本：任何一份被手改或来自旧构建，verify 都会红。
+    for _rel in version config/world config/world.sh config/world.bare-metal \
+                "config/world.bare-metal.$_arch" config/arch config/dataset \
+                config/forbidden-world config/oneshot-packages; do
+        [ -f "$_decl_root/$_rel" ] || continue
+        printf 'decl %s /opt/ordo/%s\n' "$(_sum "/opt/ordo/$_rel")" "$_rel"
+        _entries=$((_entries + 1))
+    done
+    for _src in "$_decl_root"/config/platform/*/world.base \
+                "$_decl_root"/config/platform/*/world \
+                "$_decl_root"/config/apps.d/*.list \
+                "$_decl_root"/config/package.use/* \
+                "$_decl_root"/config/package.accept_keywords/* \
+                "$_decl_root"/config/package.mask/*; do
+        [ -f "$_src" ] || continue
+        _rel=$(_target "$_src")
+        printf 'decl %s %s\n' "$(_sum "$_rel")" "$_rel"
+        _entries=$((_entries + 1))
+    done
+    # 部署产物：构建时从声明拷出去的文件，磁盘上的字节必须与声明一致。
+    # 目标缺失也照写：verify 要能报出「部署产物缺失」，而不是静默跳过。
+    for _pair in \
+        /opt/ordo/config/desktop/umbriel/ordo-umbriel-session:/usr/local/bin/ordo-umbriel-session \
+        /opt/ordo/config/desktop/ordo-session-env:/usr/local/bin/ordo-session-env \
+        /opt/ordo/config/desktop/ffplay:/usr/local/bin/ffplay; do
+        _msrc=${_pair%%:*}
+        _mdst=${_pair##*:}
+        [ -f "$(_host "$_msrc")" ] || continue
+        printf 'copy %s %s %s\n' "$(_sum "$_msrc")" "$_msrc" "$_mdst"
+        _entries=$((_entries + 1))
+    done
+} > "$_tmp" || die "构建清单写入失败：$_out"
+
+[ "$_entries" -gt 0 ] || die "构建清单没有可登记条目：$_out（声明副本缺失？）"
+mv -f "$_tmp" "$_out" || die "构建清单落盘失败：$_out"
+chmod 644 "$_out" || die "构建清单权限设置失败：$_out"
+trap - EXIT HUP INT TERM
+printf '构建清单已写入：%s（%s 项）\n' "$_out" "$_entries"

@@ -50,9 +50,30 @@ assert_rc "$?" 0 "greetd 部署在第 14 段（品牌块之外）"
 assert_contains "$_install" '|| die "缺少 $_greetd_src/config.toml' "缺 config.toml 即中止"
 assert_not_contains "$_install" 'warn "未找到 config/desktop/greetd/config.toml"' \
     "不再把缺失降级为 warn"
-for _f in greetd.initd pam.d-greetd tmpfiles-noctalia-greeter.conf; do
-    assert_contains "$_install" "/etc/greetd" "greetd 部署覆盖 $_f 所在目录"
-done
+# 每个文件断言各自的落点；旧写法 needle 是常量 "/etc/greetd"，
+# 删掉任何一行真实部署仍然绿（C4 空转断言）。
+_deploy_dies() { # 部署行 die 消息
+    if grep -A1 -F -- "$1" "$ROOT/install.sh" | grep -qF -- "$2"; then
+        echo 0
+    else
+        echo 1
+    fi
+}
+assert_active_line "$ROOT/install.sh" \
+    'install -Dm755 "$_greetd_src/greetd.initd" /etc/init.d/greetd' \
+    "greetd 服务脚本落到 /etc/init.d/greetd"
+assert_active_line "$ROOT/install.sh" \
+    'install -Dm644 "$_greetd_src/pam.d-greetd" /etc/pam.d/greetd' \
+    "greetd PAM 落到 /etc/pam.d/greetd"
+assert_active_line "$ROOT/install.sh" \
+    'install -Dm644 "$_greetd_src/tmpfiles-noctalia-greeter.conf" /etc/tmpfiles.d/noctalia-greeter.conf' \
+    "greetd tmpfiles 落到 /etc/tmpfiles.d/noctalia-greeter.conf"
+assert_rc "$(_deploy_dies 'install -Dm755 "$_greetd_src/greetd.initd" /etc/init.d/greetd' 'greetd 服务脚本部署失败')" 0 \
+    "服务脚本缺失即 die"
+assert_rc "$(_deploy_dies 'install -Dm644 "$_greetd_src/pam.d-greetd" /etc/pam.d/greetd' 'greetd PAM 部署失败')" 0 \
+    "PAM 缺失即 die"
+assert_rc "$(_deploy_dies 'install -Dm644 "$_greetd_src/tmpfiles-noctalia-greeter.conf" /etc/tmpfiles.d/noctalia-greeter.conf' 'greetd tmpfiles 部署失败')" 0 \
+    "tmpfiles 缺失即 die"
 
 case_name "只启用 greetd，不启用 display-manager 包装"
 assert_contains "$_install" 'rc-update add greetd default || die' "greetd 失败即停"

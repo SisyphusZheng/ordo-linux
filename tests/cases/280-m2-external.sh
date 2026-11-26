@@ -6,7 +6,7 @@ import gzip, hashlib, io, sys, tarfile, tempfile, tomllib, uuid
 from unittest.mock import patch
 from pathlib import Path
 sys.path.insert(0, "dev/m2")
-from build import build, bundle, PLATFORM, archive
+from build import build, bundle, PLATFORM, archive, luciole_ebuild
 from brand_boot import brand, PAYLOAD_OFFSET
 from boot_art import LOGO_MAGIC
 # Preserve every byte of stage 2, including all device trees and U-Boot.
@@ -35,8 +35,9 @@ with tarfile.open(fileobj=io.BytesIO(gzip.decompress(a))) as t:
         assert kms not in apple.split() and overlay.getmember("kernel/drivers/gpu/drm/apple/appledrm.ko").size
     env = read("config/desktop/ordo-session-env")
     assert b'WLR_RENDERER_ALLOW_SOFTWARE:-1' in env
-    assert cfg["general"]["runfile"].startswith("/var/lib/")
-    for name in ["scripts/ordo-snap","scripts/ordo-config","scripts/sysup","config/desktop/ordo-session-env"]:
+    assert cfg["general"]["runfile"] == "/home/.ordo/greetd-first-session"
+    for name in ["scripts/ordo-snap","scripts/ordo-config","scripts/sysup",
+                 "scripts/ordo-build-manifest","config/desktop/ordo-session-env"]:
         assert t.getmember(name).mode & 0o111
     assert b"zfs_arc_max" in read("config/zfs-arc.start")
     assert read("config/desktop/wallpapers/wallpaper-blackhole.png").startswith(b"\x89PNG")
@@ -45,7 +46,7 @@ with tarfile.open(fileobj=io.BytesIO(gzip.decompress(bundle(include_legacy=False
     assert b"sys-power/power-profiles-daemon" in world and b"sys-apps/i2c-tools" in world
     assert "dev/m2/display/modules.tar.gz" not in portable.getnames()
     luciole = "overlay/gui-apps/luciole"
-    for file in ("Manifest", "luciole-0.1.0.ebuild"):
+    for file in ("Manifest", luciole_ebuild()):
         path = f"{luciole}/{file}"
         assert portable.extractfile(path).read() == Path(path).read_bytes()
 engine = (PLATFORM / "install-external.sh").read_text()

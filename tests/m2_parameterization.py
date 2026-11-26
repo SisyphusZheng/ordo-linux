@@ -6,6 +6,8 @@ dev/m2/build.py 另有两处；升级 Luciole 或换内核要同时改多个文�
 现在唯一来源是 config/platform/m2/payload.sha256（内核）与 overlay 里实际存在的 ebuild。
 """
 from pathlib import Path
+import os
+import subprocess
 import sys
 import tempfile
 from unittest.mock import patch
@@ -82,9 +84,56 @@ def shipped_payload_matches_pin():
     assert build.payload_manifest(False)["kernel/vmlinuz-" + PINNED]
 
 
+def dev_tools_derive_release():
+    """dev/m2 的重建工具也不得再写死内核版本（P2-11 M2 侧）。"""
+    display = (REPO / "dev/m2/display/rebuild.sh").read_text()
+    assert PINNED not in display, "display/rebuild.sh 仍写死内核版本"
+    assert "payload.sha256" in display and "ORDO_PAYLOAD_MANIFEST" in display
+    power = (REPO / "dev/m2/power/rebuild.sh").read_text()
+    assert PINNED not in power, "power/rebuild.sh 仍写死内核版本"
+    assert "include/config/kernel.release" in power
+
+    # 两个内核 pin 时必须拒绝猜（而不是挑一个继续跑）。
+    with tempfile.TemporaryDirectory(prefix="m2-display-") as raw:
+        tmp = Path(raw)
+        kernel = tmp / "kernel"
+        (kernel / "arch/arm64/boot").mkdir(parents=True)
+        (kernel / "arch/arm64/boot/Image").write_bytes(b"image")
+        base = tmp / "modules.tar.gz"
+        base.write_bytes(b"modules")
+        manifest = tmp / "manifest"
+        manifest.write_text(
+            f"{'a' * 64}  kernel/vmlinuz-6.0-asahi-1\n"
+            f"{'b' * 64}  kernel/vmlinuz-7.0-asahi-1\n")
+        result = subprocess.run(
+            ["sh", str(REPO / "dev/m2/display/rebuild.sh"),
+             str(kernel), str(base), str(tmp / "out.tar.gz")],
+            env={**os.environ, "ORDO_PAYLOAD_MANIFEST": str(manifest)},
+            capture_output=True, text=True)
+        assert result.returncode == 1, result
+        assert "唯一内核" in result.stderr, result.stderr
+
+    # VM 装配器同样不得钉死 ebuild 名：升级只换 overlay 里的文件名（A5）。
+    vm = (REPO / "dev/vm/configure-root.sh").read_text()
+    assert "luciole-0.1.0.ebuild" not in vm, "VM 装配器仍写死 ebuild 名"
+    assert "*.ebuild" in vm, "VM 装配器必须按 glob 取 ebuild"
+
+    # vermagic 版本从调用者的内核树读取；没有 kernel.release 必须报错，不能猜。
+    with tempfile.TemporaryDirectory(prefix="m2-power-") as raw:
+        tmp = Path(raw)
+        kernel = tmp / "kernel"
+        kernel.mkdir()
+        result = subprocess.run(
+            ["sh", str(REPO / "dev/m2/power/rebuild.sh"), str(kernel), str(tmp / "out.ko")],
+            capture_output=True, text=True)
+        assert result.returncode == 1, result
+        assert "kernel.release" in result.stderr, result.stderr
+
+
 if __name__ == "__main__":
     installer_is_parameterized()
     build_derives_release()
     build_derives_ebuild()
     shipped_payload_matches_pin()
+    dev_tools_derive_release()
     print("P2-11 m2 parameterization: ok")

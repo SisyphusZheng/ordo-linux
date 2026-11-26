@@ -24,8 +24,11 @@ case "$local_repo" in
     *) printf 'Cannot locate the local Portage overlay in the VM base.\n' >&2; exit 1 ;;
 esac
 luciole=gui-apps/luciole
-for file in Manifest luciole-0.1.0.ebuild; do
-    install -Dm644 "$repo/overlay/$luciole/$file" "$local_repo/$luciole/$file"
+# ebuild 名带版本号（升级只换文件名）：按 glob 校验，不在装配器里钉死版本。
+install -Dm644 "$repo/overlay/$luciole/Manifest" "$local_repo/$luciole/Manifest"
+for ebuild in "$repo/overlay/$luciole"/*.ebuild; do
+    test -f "$ebuild"
+    install -Dm644 "$ebuild" "$local_repo/$luciole/${ebuild##*/}"
 done
 
 groupadd -f plugdev
@@ -100,6 +103,11 @@ for svc in dbus pipewire pipewire-pulse wireplumber; do
     [ -f "/etc/user/init.d/$svc" ] || continue
     ln -sfn "/etc/user/init.d/$svc" "/etc/user/runlevels/default/$svc"
 done
+# P2-08：用户级 OpenRC 服务要以 user.ordo 实例进 default runlevel 才会被拉起；
+# 只建 /etc/user/runlevels/default/* 软链不生效。模板缺失 = 镜像基础不完整。
+test -f /etc/init.d/user
+ln -sfn /etc/init.d/user /etc/init.d/user.ordo
+rc-update add user.ordo default
 for helper in /usr/libexec/rc/bin/*; do
     [ -f "$helper" ] || continue
     [ -e "/bin/${helper##*/}" ] || ln -s "$helper" "/bin/${helper##*/}"
@@ -133,3 +141,10 @@ dracut --zstd --no-hostonly --no-early-microcode --force "/boot/initramfs-$relea
 install -D -m 644 "$vm/zfsbootmenu.yaml" /etc/zfsbootmenu/config.yaml
 generate-zbm --kver "$release"
 test -s /efi/EFI/BOOT/BOOTAA64.EFI
+
+# ---- 构建清单（P1-02）----
+# VM 装配是清单的第三个生产者：verify 在镜像里只认这份清单，
+# 缺了它 `ordo config verify` 恒 exit 2（无法判定）。生成器与 install.sh /
+# M2 外置安装共用 scripts/ordo-build-manifest，格式只在那里定义。
+# 架构固定 arm64：dev/vm/build-disk.sh 拒绝非 aarch64 宿主机。
+sh "$repo/scripts/ordo-build-manifest" / "$(cat /etc/ordo/platform)" arm64

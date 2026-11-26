@@ -34,12 +34,14 @@ exit 1
 '''
 
 
-def run_install_hardware(tmp, platform):
+def run_install_hardware(tmp, platform, raw=None):
     root = tmp / "root"
     for path in ("etc/ordo", "etc/portage/package.use", "etc/portage/package.accept_keywords",
                  "etc/portage/sets", "etc/init.d", "usr/local/bin", "var/lib/portage"):
         (root / path).mkdir(parents=True, exist_ok=True)
-    if platform is not None:
+    if raw is not None:
+        (root / "etc/ordo/platform").write_text(raw)
+    elif platform is not None:
         (root / "etc/ordo/platform").write_text(platform + "\n")
     bins = tmp / "bin"
     bins.mkdir(exist_ok=True)
@@ -78,6 +80,16 @@ def platform_contract():
         # 3) 已是 m2 时保持 m2
         root = run_install_hardware(tmp / "c", "m2")
         assert (root / "etc/ordo/platform").read_text().strip() == "m2"
+        # 4) 已存在的 marker 一律不改写：带注释/多行的 m2-native 仍是 native。
+        #    旧实现把整份文件与 "m2-native" 做字符串比较，注释行会让它判成
+        #    “非 native”并静默降级成 m2；还原旧实现这条用例变红（B3）。
+        annotated = "m2-native\n# 原生包集由 install-native.sh 写入\n"
+        root = run_install_hardware(tmp / "d", None, raw=annotated)
+        assert (root / "etc/ordo/platform").read_text() == annotated, \
+            "已存在的平台标记被改写（m2-native 会被降级）"
+        # 其它平台的标记同样不能被本脚本改成 m2：写错比写不出更糟。
+        root = run_install_hardware(tmp / "e", "vm")
+        assert (root / "etc/ordo/platform").read_text().strip() == "vm"
 
 
 def world_set_contract():

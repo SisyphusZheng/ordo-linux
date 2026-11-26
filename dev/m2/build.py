@@ -44,6 +44,9 @@ def bundle(include_legacy=True):
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w", format=tarfile.GNU_FORMAT) as tar:
         inputs = sorted(path for path in (REPO / "config/desktop").rglob("*") if path.is_file() and not path.name.startswith("._") and path.name != ".DS_Store")
+        # 首启应用清单必须进 /opt/ordo：first-apps.sh 读的是 /opt/ordo/config/apps.d，
+        # 没有它 M2 装完就没有浏览器与可视化商店（P1-04）。
+        inputs.extend(sorted(path for path in (REPO / "config/apps.d").rglob("*") if path.is_file()))
         inputs.extend(sorted(path for path in (PLATFORM / "package-defaults").rglob("*") if path.is_file()))
         for name in ("config/platform/m2/first-desktop.sh", "config/platform/m2/first-apps.sh",
                      "config/platform/m2/install-display.sh",
@@ -70,7 +73,8 @@ def bundle(include_legacy=True):
                      "config/forbidden-world", "config/oneshot-packages", "version",
                      "scripts/lib.sh", "scripts/ordo-i18n.sh", "scripts/ordo", "scripts/doctor",
                      "scripts/ordo-config", "scripts/ordo-snap", "scripts/ordo-snap-auto",
-                     "scripts/ordo-backup", "scripts/ordo-migrate", "scripts/ordo-selfcheck", "scripts/sysup"):
+                     "scripts/ordo-backup", "scripts/ordo-migrate", "scripts/ordo-selfcheck",
+                     "scripts/ordo-build-manifest", "scripts/sysup"):
             inputs.append(REPO / name)
         if include_legacy:
             inputs.append(REPO / "dev/m2/display/modules.tar.gz")

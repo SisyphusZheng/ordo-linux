@@ -105,9 +105,35 @@ RUNNING_ROOT="$(detect_running_root)"
 [ -n "$RUNNING_ROOT" ] || RUNNING_ROOT="$DATASET"
 export RUNNING_ROOT
 
-# 当前是否运行在「非规范」数据集上（回滚后的 clone）
+# 构建/验收期的测试 BE：由 config/dataset 的 TEST_BE 显式登记。
+# 它是声明的身份，不是回滚 clone —— ordo snap 不该提示 promote/rename。
+is_test_be() {
+    [ -n "${TEST_BE:-}" ] && [ "$RUNNING_ROOT" = "$TEST_BE" ]
+}
+
+# 构建/验收期的临时数据集：config/dataset 的 BUILD_DATASETS（空格分隔 glob）。
+# 命中 = 可销毁的构建残留，不属于发行布局。
+ordo_is_ephemeral_dataset() { # dataset
+    _odo_ds=$1
+    if [ -n "${TEST_BE:-}" ] && [ "$_odo_ds" = "$TEST_BE" ]; then
+        return 0
+    fi
+    # 故意不加引号：BUILD_DATASETS 是 glob 列表，不是单个路径。
+    # shellcheck disable=SC2086,SC2254
+    for _odo_pat in ${BUILD_DATASETS:-}; do
+        case "$_odo_ds" in $_odo_pat) return 0 ;; esac
+    done
+    return 1
+}
+
+# 当前是否运行在「非规范」数据集上（回滚后的 clone）。
+# 声明的测试 BE 不算回滚：它没有 clone 依赖，也没有可 promote 的源快照。
 is_rolled_back_env() {
-    [ "$RUNNING_ROOT" != "$DATASET" ]
+    [ "$RUNNING_ROOT" != "$DATASET" ] || return 1
+    if is_test_be; then
+        return 1
+    fi
+    return 0
 }
 
 # 给用户看的身份提示（只在漂移时输出，避免噪音）

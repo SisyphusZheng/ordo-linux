@@ -39,7 +39,7 @@ config/desktop/{umbriel,noctalia,greetd}/*.toml
 | 消费方 | 约定 |
 |---|---|
 | NetworkManager | Wi-Fi 密码存系统 keyfile（`psk-flags=0`），不依赖 agent |
-| Noctalia 网络面板 | 会尝试用 `org.freedesktop.secrets` 存取密码；缺失时日志报 `[network] keyring lookup failed`，若连接被建成 agent-owned 需改回系统存储：`nmcli connection modify <连接名> wifi-sec.psk-flags 0` |
+| Noctalia 网络面板 | 会尝试用 `org.freedesktop.secrets` 存取密码；缺失时日志报 `[network] keyring lookup failed`，连接被建成 agent-owned 后掉线取不回密码（连上约 1 秒又断开）。用 `doas ordo-wifi "<SSID>"` 建系统级配置（`psk-flags=0`、`permissions` 为空），或对已有连接执行 `nmcli connection modify <连接名> wifi-sec.psk-flags 0` |
 | 依赖钥匙环的应用 | 用自己的账号体系登录与存储；不保证跨会话记住密码 |
 
 验收：`sh config/desktop/keyring-policy.sh check`（0 通过 / 1 有残留或缺少

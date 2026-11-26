@@ -43,8 +43,9 @@ if [ -z "${WLR_RENDERER:-}" ]; then
         [ -r "$_dri" ] || continue
         _node=$(ordo_render_node) || :
         # OpenRC 冷插期间，greetd 首次登录可能先于 AGX 的 udev 节点。
-        if [ -z "$_node" ] && [ "$(cat /etc/ordo/platform 2>/dev/null || :)" = m2-native ] &&
-           [ -r /proc/device-tree/compatible ] &&
+        # 是否等待由硬件事实（设备树 apple,j413）决定，不看 /etc/ordo/platform：
+        # 平台名是安装期标签，可能缺失或仍写着 m2，拿它做门控会让真机静默走 pixman。
+        if [ -z "$_node" ] && [ -r /proc/device-tree/compatible ] &&
            tr '\000' '\n' < /proc/device-tree/compatible | grep -Fxq apple,j413 &&
            modinfo asahi >/dev/null 2>&1; then
             _tries=0

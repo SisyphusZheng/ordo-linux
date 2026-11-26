@@ -211,13 +211,17 @@ wireless() {
         printf '  原因：没有 brcmfmac 注册的无线网卡（固件没被请求到）\n' >&2
         return 1
     fi
-    # 固件请求失败后 brcmfmac 不会重试，只有内核日志能证明它真的起来了（P1-03）
+    # 固件请求失败后 brcmfmac 不会重试，只有内核日志能证明它真的起来了（P1-03）。
     if ! kernel_log=$(dmesg 2>/dev/null) || [ -z "$kernel_log" ]; then
         printf '  待验：读不到内核日志（dmesg），无法排除固件请求失败\n' >&2
         return 2
     fi
-    if printf '%s\n' "$kernel_log" | grep -Eq 'brcmfmac.*failed with error -2'; then
-        printf '  原因：内核日志仍记录 brcmfmac 固件请求失败（error -2）\n' >&2
+    # 板型后缀链（-TPHN-u-4.7-X2 → … → -TPHN）逐条 -2 是正常探测序列：
+    # 内核最后会加载无后缀的兜底名 apple,hokkaido{.bin,.txt,.clm_blob}。
+    # 真机 dmesg 里这些兜底名加载成功、Wi-Fi 正常；只有兜底名也 -2 才是坏。
+    if printf '%s\n' "$kernel_log" |
+       grep -Eq 'brcmfmac.*apple,hokkaido\.(bin|txt|clm_blob).*failed with error -2'; then
+        printf '  原因：内核日志记录兜底固件 apple,hokkaido.* 请求失败（error -2）\n' >&2
         return 1
     fi
     return 0

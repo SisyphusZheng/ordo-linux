@@ -6,9 +6,12 @@
   2. 消费端只跳 # 开头的行 —— 带行内注释的一整行被当成 app id；
   3. M2 路径全文没有 apps.d —— 清单写了也无人执行。
 """
+import io
 import os
 from pathlib import Path
 import subprocess
+import sys
+import tarfile
 import tempfile
 
 REPO = Path(__file__).resolve().parents[1]
@@ -65,6 +68,22 @@ def fixture(tmp):
     (apps / "01-optional.list").write_text("org.gnome.Nautilus # 可选\n")
 
 
+def bundle_contract():
+    """交付 bundle 必须携带 config/apps.d，否则 /opt/ordo 里没有清单可读。"""
+    sys.path.insert(0, str(REPO / "dev/m2"))
+    import build  # noqa: E402
+
+    with tarfile.open(fileobj=io.BytesIO(build.bundle()), mode="r:gz") as payload:
+        names = set(payload.getnames())
+    lists = sorted((REPO / "config/apps.d").glob("*.list"))
+    assert lists, "config/apps.d 里至少要有 00-core.list"
+    for path in lists:
+        rel = path.relative_to(REPO).as_posix()
+        assert rel in names, f"bundle 缺首启清单：{rel}"
+    # 目录本身也要能从 tar 中还原（tar -xzf 会按成员自动建目录）
+    assert any(name.startswith("config/apps.d/") for name in names), names
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="m2-apps-") as raw:
         tmp = Path(raw)
@@ -108,6 +127,16 @@ def main():
         assert not installed, "remote 落不了库时不能假装装上了"
         assert "flathub" in result.stderr
 
+    # 清单目录缺失不是“没有应用要装”，而是镜像不完整：必须告警 + 非零退出，
+    # 让首启留下明确证据并在下次启动重试（旧实现静默 exit 0）。
+    with tempfile.TemporaryDirectory(prefix="m2-apps-") as raw:
+        tmp = Path(raw)
+        result, calls, installed = run(tmp, ORDO_APPS_DIR=str(tmp / "missing"))
+        assert result.returncode == 1, result
+        assert not calls and not installed
+        assert "应用清单目录不存在" in result.stderr and "missing" in result.stderr
+        assert not (tmp / "state/first-apps.done").exists(), "缺清单不能写完成标记"
+
     # 首启接线：install-external.sh 跑的 first-desktop.sh 必须登记 local.d 任务
     first = (PLATFORM / "first-desktop.sh").read_text()
     assert 'install -m 755 /opt/ordo/config/platform/m2/first-apps.sh /usr/local/sbin/ordo-first-apps' in first
@@ -117,6 +146,7 @@ def main():
     # 拿它当锚点只是把「运行级注册的排版顺序」误当成契约，故改锚到 hook 本身。
     assert first.index("first-apps.sh") < first.index("70-ordo-first-apps.start")
     assert "exec /usr/local/sbin/ordo-first-apps" in first
+    bundle_contract()
     print("P1-04 first-boot apps: ok")
 
 

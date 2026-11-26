@@ -438,11 +438,37 @@ else
     exit 1
 fi
 
+# ---- EFI 默认引导兜底（P1-01）----
+# 固件默认入口：NVRAM 写失败或固件不认 BootXXXX 时，UEFI 会执行
+# \EFI\BOOT\BOOT<ARCH>.EFI。generate-zbm 只写 /efi/EFI/ZBM/vmlinuz.EFI，
+# 不复制这一份就等于把「能否开机」押在 efibootmgr 上（外置安装已有兜底）。
+# 根路径可用 ORDO_EFI_ROOT 覆盖（仅测试用；正式安装恒为 /efi）。
+_efi_root="${ORDO_EFI_ROOT:-/efi}"
+case "$ARCH" in
+    arm64) _efi_default="$_efi_root/EFI/BOOT/BOOTAA64.EFI" ;;
+    amd64) _efi_default="$_efi_root/EFI/BOOT/BOOTX64.EFI" ;;
+    *) die "未知架构，无法选择 EFI 默认引导名：${ARCH:-空}" ;;
+esac
+[ -s "$_efi_root/EFI/ZBM/vmlinuz.EFI" ] \
+    || die "generate-zbm 未产出 $_efi_root/EFI/ZBM/vmlinuz.EFI —— 没有可兜底的引导文件"
+mkdir -p "$_efi_root/EFI/BOOT"
+install -m 0644 "$_efi_root/EFI/ZBM/vmlinuz.EFI" "$_efi_default" \
+    || die "固件默认引导写入失败：$_efi_default"
+cmp -s "$_efi_root/EFI/ZBM/vmlinuz.EFI" "$_efi_default" \
+    || die "固件默认引导读回不一致：$_efi_default"
+say "已写入固件默认引导：$_efi_default"
+
 say "注册 EFI 启动项"
 epath='/EFI/ZBM/vmlinuz.EFI'
-efibootmgr --create --disk "$DISK" --part 1 \
-    --label "Ordo Linux" --loader "$epath" \
-    || warn "EFI 启动项注册失败（可能需在 live 环境执行或手动：FS0:\\EFI\\ZBM\\vmlinuz.EFI）"
+if efibootmgr --create --disk "$DISK" --part 1 \
+    --label "Ordo Linux" --loader "$epath"; then
+    say "EFI 启动项已注册"
+else
+    # 注册失败时唯一入口必须是刚写下的固件默认引导；它也不在就真的开不了机。
+    [ -s "$_efi_default" ] \
+        || die "EFI 启动项注册失败，且没有固件默认引导兜底：$_efi_default 不存在"
+    warn "EFI 启动项注册失败（已由固件默认引导 $_efi_default 兜底；也可手动 FS0:\\EFI\\ZBM\\vmlinuz.EFI）"
+fi
 
 # ---- 6) 主机名 / 用户 / 权限 ----
 say "主机名与用户"
@@ -586,9 +612,13 @@ chmod 755 /etc/cron.monthly/zfs-scrub
 # 属于同一个用户（这里以 root 跑，加了只会落到系统仓库，首启的 ordo 看不到）。
 # remote 与清单安装一起做，见 §15。
 say "配置 Flatpak 自动更新"
-if ! command -v flatpak >/dev/null 2>&1; then
-    warn "flatpak 命令不存在（@world 应已装 sys-apps/flatpak，核对 config/world 与本轮 emerge）"
-fi
+# 【P1-04】flatpak 是应用层的唯一入口：缺失时首启没有浏览器 / 商店，
+# ordo app install 也无从补救。安装期就停，不把缺件留到首启。
+require_flatpak() {
+    command -v flatpak >/dev/null 2>&1 \
+        || die "flatpak 命令不存在（@world 应已装 sys-apps/flatpak）—— 应用层全部依赖它"
+}
+require_flatpak
 # 每周自动更新（照 /etc/cron.monthly/zfs-scrub 的写法；cronie 已在 §11b 启用）
 # 应用层全部依赖 Flatpak，漏更新等于长期积累安全债，故每周而非每月。
 # 注意：ordo app install 走 --user（装在各用户家目录），root 的 system 安装互不相通，
@@ -837,7 +867,8 @@ say "已启用音频用户服务（pipewire / pipewire-pulse / wireplumber）"
 # 永远不生效，"音频由用户级 OpenRC 管理"只是注释。模板缺失时不连坐（warn）。
 if [ -f /etc/init.d/user ]; then
     ln -sfn /etc/init.d/user /etc/init.d/user.ordo
-    rc-update add user.ordo default || warn "user.ordo 注册失败（用户级服务需手动启用）"
+    # user.ordo 注册失败 = 音频/会话总线用户服务永不启动（P2-08），不能降级为 warn。
+    rc-update add user.ordo default || die "user.ordo 注册失败（用户级服务不会启动）"
     say "已启用 user.ordo（用户级 dbus / pipewire 等）"
 else
     warn "缺少 /etc/init.d/user（openrc 用户服务模板），用户级服务需手动启用"
@@ -947,9 +978,8 @@ flatpak_apps_of() {
 # 所以 remote 与应用都以桌面用户身份执行（P1-04）。
 say "安装 Flatpak 应用清单"
 _flatpak_user="${ORDO_DESKTOP_USER:-ordo}"
-if ! command -v flatpak >/dev/null 2>&1; then
-    warn "flatpak 命令不存在（@world 应已装 sys-apps/flatpak，核对 config/world 与本轮 emerge）"
-elif ! id -u "$_flatpak_user" >/dev/null 2>&1; then
+require_flatpak
+if ! id -u "$_flatpak_user" >/dev/null 2>&1; then
     warn "桌面用户 $_flatpak_user 不存在，跳过应用清单（首启后用 ordo app install 补装）"
 else
     as_flatpak_user() { su -s /bin/sh - "$_flatpak_user" -c "$1"; }
@@ -990,46 +1020,11 @@ rc-update add cronie default 2>/dev/null || warn "cronie 注册失败（定时�
 # 旧版的 `ordo config verify` 拿 /opt/ordo/config 和由它自己派生出的
 # /etc/portage/sets/ordo-core 比 —— 两边同源，verdict 恒绿；镜像里的
 # 旧副本（world 少 4 个 atom、会话脚本 1777B、版本三处不一致）照报「一致」。
-# 这里把本次构建的声明副本与部署产物逐文件落成 sha256 清单：
-# verify 只认这份清单，清单缺失 = 无法判定（退出码 2），不是通过。
+# 生成逻辑统一在 scripts/ordo-build-manifest：install.sh / M2 外置安装 /
+# VM 装配三处共用同一格式，verify 只认这份清单（缺失 = 无法判定，不是通过）。
 say "写入构建清单（/etc/ordo/build-manifest）"
-[ -s /opt/ordo/version ] || die "缺少 /opt/ordo/version —— 构建清单无从记录版本（§11 应已安装）"
-_manifest_sha() { sha256sum "$1" | awk '{print $1}'; }
-mkdir -p /etc/ordo
-{
-    printf 'manifest_version 1\n'
-    printf 'version %s\n' "$(cat /opt/ordo/version)"
-    printf 'platform %s\n' "$ORDO_PLATFORM"
-    printf 'arch %s\n' "$ARCH"
-    # 声明文件的装机副本：任何一份被手改或来自旧构建，verify 都会红。
-    for _rel in version config/world config/world.sh config/world.bare-metal \
-                "config/world.bare-metal.$ARCH" config/arch config/dataset \
-                config/forbidden-world config/oneshot-packages; do
-        [ -f "/opt/ordo/$_rel" ] || continue
-        printf 'decl %s %s\n' "$(_manifest_sha "/opt/ordo/$_rel")" "/opt/ordo/$_rel"
-    done
-    for _f in /opt/ordo/config/platform/*/world.base /opt/ordo/config/platform/*/world \
-              /opt/ordo/config/apps.d/*.list \
-              /opt/ordo/config/package.use/* \
-              /opt/ordo/config/package.accept_keywords/* \
-              /opt/ordo/config/package.mask/*; do
-        [ -f "$_f" ] || continue
-        printf 'decl %s %s\n' "$(_manifest_sha "$_f")" "$_f"
-    done
-    # 部署产物：构建时从声明拷出去的文件，磁盘上的字节必须与声明一致。
-    for _pair in \
-        /opt/ordo/config/desktop/umbriel/ordo-umbriel-session:/usr/local/bin/ordo-umbriel-session \
-        /opt/ordo/config/desktop/ordo-session-env:/usr/local/bin/ordo-session-env \
-        /opt/ordo/config/desktop/ffplay:/usr/local/bin/ffplay; do
-        _msrc=${_pair%%:*}
-        _mdst=${_pair##*:}
-        [ -f "$_msrc" ] || continue
-        # 目标缺失也照写：verify 要能报出「部署产物缺失」，而不是静默跳过。
-        printf 'copy %s %s %s\n' "$(_manifest_sha "$_msrc")" "$_msrc" "$_mdst"
-    done
-} > /etc/ordo/build-manifest || die "构建清单写入失败（/etc/ordo/build-manifest）"
-chmod 644 /etc/ordo/build-manifest
-say "构建清单已写入：$(grep -cE '^(decl|copy) ' /etc/ordo/build-manifest | tr -d ' ') 项"
+sh /opt/ordo/scripts/ordo-build-manifest / "$ORDO_PLATFORM" "$ARCH" \
+    || die "构建清单生成失败（/etc/ordo/build-manifest）"
 
 say "chroot 完成"
 CHROOT

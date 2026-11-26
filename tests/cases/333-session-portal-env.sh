@@ -98,4 +98,56 @@ assert_contains "$_env_src" '*/asahi|*/virtio_gpu' "探测接受 virtio_gpu 驱�
 assert_contains "$_env_src" 'virtio_gpu_dri.so' "同时看 virtio_gpu 的 Mesa 驱动"
 assert_not_contains "$_env_src" 'for _mesa in /usr/lib*/dri/asahi_dri.so; do' "不再只按 asahi_dri.so 门控"
 
+case_name "渲染等待只按设备树 apple,j413，不按 /etc/ordo/platform"
+
+# 把脚本里的绝对路径换到夹具目录，其余逻辑逐字保留。
+sed -e "s|/sys/class/drm|$scratch/sys/class/drm|g" \
+    -e "s|/dev/dri|$scratch/dev/dri|g" \
+    -e "s|/usr/lib\*/dri/|$scratch/lib/dri/|g" \
+    -e "s|/proc/device-tree/compatible|$scratch/compatible|g" \
+    -e "s|/etc/ordo/platform|$scratch/platform|g" \
+    "$repo/config/desktop/ordo-session-env" > "$scratch/session-env"
+mkdir -p "$scratch/sys/class/drm" "$scratch/dev/dri" "$scratch/lib/dri" \
+    "$scratch/drivers" "$scratch/home"
+: > "$scratch/lib/dri/asahi_dri.so"
+printf '#!/bin/sh\nexit 0\n' > "$scratch/bin/modinfo"
+chmod +x "$scratch/bin/modinfo"
+# 故意把平台标签写成 m2（不是 m2-native）：旧版拿它做门控，会跳过等待。
+printf 'm2\n' > "$scratch/platform"
+printf 'apple,j413\000apple,t8112\000' > "$scratch/compatible"
+
+cat > "$scratch/probe.sh" <<EOF
+#!/bin/sh
+. "$scratch/session-env"
+printf '%s|%s|%s\n' "\${WLR_RENDERER:-}" "\${WLR_RENDER_DRM_DEVICE:-}" "\${ORDO_ASAHI_RENDER_NODE_TIMEOUT:-}"
+EOF
+
+_run_probe() {
+    env -u WLR_RENDERER -u WLR_RENDER_DRM_DEVICE -u ORDO_ASAHI_RENDER_NODE_TIMEOUT \
+        HOME="$scratch/home" XDG_RUNTIME_DIR="$scratch/run" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$scratch/run/bus" \
+        PATH="$scratch/bin:$PATH" sh "$scratch/probe.sh"
+}
+
+# AGX 节点在登录后约 0.3s 才出现：只有真的等待才等得到。
+(
+    sleep 0.3
+    mkdir -p "$scratch/sys/class/drm/renderD128/device"
+    ln -s "$scratch/drivers/asahi" "$scratch/sys/class/drm/renderD128/device/driver"
+    : > "$scratch/dev/dri/renderD128"
+) &
+_waiter=$!
+_out=$(_run_probe)
+wait "$_waiter"
+assert_eq "$_out" "gles2|$scratch/dev/dri/renderD128|" \
+    "j413 + 平台标签 m2：仍等待并采用 AGX 节点"
+
+case_name "非 j413 设备树不等待（平台名不能单独触发）"
+
+rm -rf "$scratch/sys/class/drm/renderD128" "$scratch/dev/dri/renderD128"
+printf 'linux,dummy-virt\000' > "$scratch/compatible"
+printf 'm2-native\n' > "$scratch/platform"
+_out=$(_run_probe)
+assert_eq "$_out" "pixman||" "无 apple,j413 时不等待、不设超时标记"
+
 finish

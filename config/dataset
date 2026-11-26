@@ -3,3 +3,16 @@
 POOL="${POOL:-rpool}"
 DATASET="${DATASET:-$POOL/root/ordo}"        # 根 = 可回滚的 boot environment
 HOME_DATASET="${HOME_DATASET:-$POOL/home}"   # 用户数据，回滚系统时不动它
+
+# ---- 构建/验收期的临时数据集（不属于发行布局，装完应清理）----
+# 这些名字过去只存在于构建机的 `zpool list` 里：镜像带着 68.6G/11.6G 的
+# 构建残留交付，bootfs 还指着测试 BE rpool/root/ordo-m2-hardware（P1-02）。
+# BUILD_DATASETS：构建缓存/中间产物（空格分隔的 glob，可用环境变量覆盖）
+# TEST_BE：验收镜像使用的非规范 BE 名。它是**声明的身份**，不是回滚 clone，
+#          所以 ordo snap 不应提示把它 promote/rename 成 DATASET。
+BUILD_DATASETS="${BUILD_DATASETS:-$POOL/ordo-build-* $POOL/ordo-m2-build}"
+TEST_BE="${TEST_BE:-$POOL/root/ordo-m2-hardware}"
+# 清理（手工；先确认 bootfs 已离开 TEST_BE，再销毁）：
+#   zfs list -H -o name | grep -E "^$POOL/(ordo-build-|ordo-m2-build$)" |
+#       xargs -r -n1 zfs destroy -r
+#   zfs destroy -r "$TEST_BE"     # 仅在 bootfs 指向规范 BE 之后

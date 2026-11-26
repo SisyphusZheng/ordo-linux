@@ -1,12 +1,25 @@
 #!/bin/sh
 # Rebuild the J413 display dependency chain and kmod indices on Linux.
 set -eu
+here=$(dirname "$(readlink -f "$0")")
 kernel=${1:?configured and built Asahi kernel tree}
 base=${2:?original modules.tar.gz}
 out=${3:?output tar.gz}
-release=7.0.9-asahi-2
-echo "9d960d8ff6bea64367604ee4d0253ecd01d96a902585a92ff59d291ba775a43d  $kernel/arch/arm64/boot/Image" | sha256sum -c -
-echo "f8b37705d1693064a3bb05fbbbc4a0cc4ad0df97ce93b18ab21de84968d21deb  $base" | sha256sum -c -
+# 内核版本与两个摘要不在脚本里写死：payload.sha256 是唯一来源（P2-11）。
+manifest=${ORDO_PAYLOAD_MANIFEST:-"$here/../../../config/platform/m2/payload.sha256"}
+release=$(awk '$2 ~ /^kernel\/vmlinuz-/ && $2 !~ /\.EFI$/ { sub(/^kernel\/vmlinuz-/, "", $2); print $2 }' "$manifest")
+if [ -z "$release" ] || [ "$(printf '%s\n' "$release" | wc -l | tr -d ' ')" != 1 ]; then
+    printf 'payload.sha256 必须固定唯一内核：%s\n' "$manifest" >&2
+    exit 1
+fi
+image=$(awk -v entry="kernel/vmlinuz-$release" '$2 == entry { print $1 }' "$manifest")
+modules=$(awk '$2 == "kernel/modules.tar.gz" { print $1 }' "$manifest")
+if [ -z "$image" ] || [ -z "$modules" ]; then
+    printf 'payload.sha256 缺少镜像或模块包摘要：%s\n' "$manifest" >&2
+    exit 1
+fi
+printf '%s  %s\n' "$image" "$kernel/arch/arm64/boot/Image" | sha256sum -c -
+printf '%s  %s\n' "$modules" "$base" | sha256sum -c -
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 tree="$work/lib/modules/$release"

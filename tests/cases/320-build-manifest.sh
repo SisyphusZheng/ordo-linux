@@ -89,16 +89,27 @@ printf 'tampered\n' > "$tmp/session"
 _verify_build_manifest
 assert_eq "$n_bad" 1 "摘要不符的部署产物报问题"
 
-case_name "install.sh 真的写这份清单"
+case_name "构建清单的生产者抽到 scripts/ordo-build-manifest"
 _install="$(cat "$ROOT/install.sh")"
-assert_contains "$_install" '/etc/ordo/build-manifest' "安装器写 /etc/ordo/build-manifest"
-assert_contains "$_install" "manifest_version 1" "清单带格式版本"
-assert_contains "$_install" 'printf '"'"'version %s\n'"'"' "$(cat /opt/ordo/version)"' \
-    "清单的 version 取自唯一来源 /opt/ordo/version"
-assert_contains "$_install" 'config/world config/world.sh' "清单覆盖 world 声明"
-assert_contains "$_install" '/usr/local/bin/ordo-umbriel-session' "清单覆盖部署的会话脚本"
-assert_contains "$_install" 'sha256sum' "清单用 sha256 摘要"
+_generator="$(cat "$ROOT/scripts/ordo-build-manifest" 2>/dev/null)"
+assert_contains "$_generator" "printf 'manifest_version 1" "生成器写格式版本"
+assert_contains "$_generator" "printf 'version %s\\n'" "生成器的 version 取自安装根的 /opt/ordo/version"
+assert_contains "$_generator" 'config/world config/world.sh' "清单覆盖 world 声明"
+assert_contains "$_generator" '/usr/local/bin/ordo-umbriel-session' "清单覆盖部署的会话脚本"
+assert_contains "$_generator" 'ordo_sha256' "清单用 sha256 摘要"
+assert_contains "$_install" '/opt/ordo/scripts/ordo-build-manifest' "install.sh 调用生成器"
+assert_contains "$_install" '/etc/ordo/build-manifest' "安装器仍写 /etc/ordo/build-manifest"
 
+case_name "镜像构建器也产清单（M2 外置安装 / VM 装配）"
+assert_active_line "$ROOT/install.sh" \
+    'sh /opt/ordo/scripts/ordo-build-manifest / "$ORDO_PLATFORM" "$ARCH"' \
+    "install.sh 调用生成器"
+assert_active_line "$ROOT/config/platform/m2/install-external.sh" \
+    'chroot "$TARGET" /bin/sh /opt/ordo/scripts/ordo-build-manifest / "$_manifest_platform" arm64' \
+    "M2 外置安装调用生成器"
+assert_active_line "$ROOT/dev/vm/configure-root.sh" \
+    'sh "$repo/scripts/ordo-build-manifest" / "$(cat /etc/ordo/platform)" arm64' \
+    "VM 装配调用生成器"
 case_name "verify 把清单检查接进主流程"
 _conf="$(cat "$ROOT/scripts/ordo-config")"
 assert_contains "$_conf" '[0] 构建清单' "verify 有构建清单段"

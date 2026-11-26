@@ -42,6 +42,23 @@ ordo app list
 ordo app install org.mozilla.firefox
 ```
 
+## 连 Wi-Fi：用 ordo-wifi 建一次
+
+Ordo 默认没有系统钥匙环。Noctalia 的网络面板会把新连接建成「密码交给钥匙环」
+的类型；本机没有钥匙环，密码不会保存，表现为输对密码后连上约 1 秒又断开、
+反复重试。
+
+**不要在面板里直连**，用 helper 建一次系统级配置：
+
+```sh
+doas ordo-wifi "你的 Wi-Fi 名"
+# 如果提示找不到命令（旧镜像还没有把它放进 PATH）：
+doas /opt/ordo/scripts/ordo-wifi "你的 Wi-Fi 名"
+```
+
+它会提示输入密码，把密码存进 NetworkManager 的系统配置，之后开机会自动重连，
+不依赖钥匙环。已经用面板建过同名连接也没关系，再运行一次即可改回系统存储。
+
 ## 你的配置在哪里
 
 | 路径 | 内容 | 该不该手改 |

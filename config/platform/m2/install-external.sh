@@ -467,6 +467,16 @@ chroot "$TARGET" /bin/sh -c '
 umount "$TARGET/dev" 2>/dev/null || true
 umount "$TARGET/sys" 2>/dev/null || true
 umount "$TARGET/proc" 2>/dev/null || true
+
+# ---- 构建清单（P1-02）----
+# M2 外置安装此前不产 /etc/ordo/build-manifest，真机上 `ordo config verify`
+# 恒 exit 2（无法判定）。生成器与 install.sh / VM 装配共用
+# scripts/ordo-build-manifest，格式只在那里定义。
+# 平台取 install-hardware.sh / install-native.sh 刚写下的值（m2 / m2-native）。
+_manifest_platform=$(cat "$TARGET/etc/ordo/platform" 2>/dev/null || printf '%s\n' m2)
+chroot "$TARGET" /bin/sh /opt/ordo/scripts/ordo-build-manifest / "$_manifest_platform" arm64 \
+    || die "构建清单生成失败（$TARGET/etc/ordo/build-manifest）"
+
 for ssh_service in "$TARGET"/etc/runlevels/*/sshd; do
     [ -L "$ssh_service" ] || continue
     rm -f -- "$ssh_service" || die "无法停用镜像自带的 sshd"

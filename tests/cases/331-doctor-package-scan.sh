@@ -17,7 +17,9 @@ trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/root/scripts" "$scratch/root/config/desktop" "$scratch/bin" "$scratch/db"
 
 printf 'POOL=rpool\nDATASET=rpool/root/ordo\nHOME_DATASET=rpool/home\n' > "$scratch/root/config/dataset"
-printf 'sys-apps/baseline\n' > "$scratch/world"
+# world 里放一个被 `!` 豁免的基线包：旧版 world 分支把 `!` 行 continue 掉，
+# `app-editors/*` 会把它误报成越界（P2-09 的第二处假绿灯）。
+printf 'sys-apps/baseline\napp-editors/nano\n' > "$scratch/world"
 cp "$repo/scripts/lib.sh" "$scratch/root/scripts/lib.sh"
 sed -e "s|/var/lib/portage/world|$scratch/world|g" \
     -e "s|/var/db/pkg|$scratch/db|g" \
@@ -65,10 +67,39 @@ assert_contains "$_out" "已安装禁入包: app-editors/vim-9.0.12" "vim 被报
 assert_contains "$_out" "已安装禁入包: app-misc/emacs-29.4" "emacs 被报出"
 assert_contains "$_out" "已安装禁入包: net-misc/curl-8.5.0" "curl 被报出（不是只报第一个）"
 assert_not_contains "$_out" "app-editors/nano-2.9.8" "!app-editors/nano 豁免生效"
+assert_not_contains "$_out" "world 含应用级包:" "world 分支也认 ! 豁免（nano 是基线包，整行不报）"
 assert_not_contains "$_out" "均无应用级大件" "有残留时不得打绿勾"
 
 case_name "命中计入退出码（打印 ✘ 就不能 0 退出）"
 
 assert_eq "$_delta" 3 "问题计数比基线多 3（未计数/提前 exit 都会小于 3）"
+
+case_name "world 分支的豁免表是活的（去掉 ! 行必须变红）"
+
+# 先证明夹具本身能命中：删掉豁免行后，nano 必须被 world 分支报出来。
+cat > "$scratch/root/config/forbidden-world" <<'FW'
+app-editors/*
+app-misc/emacs
+net-misc/curl
+FW
+_out=$(_run_doctor)
+assert_contains "$_out" "world 含应用级包:" "无豁免行时 world 里的 nano 被报出"
+# 复原豁免表，供后续 case 使用。
+cat > "$scratch/root/config/forbidden-world" <<'FW'
+app-editors/*
+!app-editors/nano
+app-misc/emacs
+net-misc/curl
+FW
+
+case_name "find 扫描失败时 skip，不得打「无应用级大件」绿勾"
+
+# 旧版把 find 的 stderr 与退出码一起丢掉；扫描失败时 _hits 为空，仍然打 ✔。
+printf '#!/bin/sh\nexit 1\n' > "$scratch/bin/find"
+chmod +x "$scratch/bin/find"
+_out=$(_run_doctor)
+assert_contains "$_out" "find 扫描" "点名 find 扫描失败"
+assert_contains "$_out" "不是通过" "明确标为无法判定"
+assert_not_contains "$_out" "均无应用级大件" "扫描失败不得冒充通过"
 
 finish

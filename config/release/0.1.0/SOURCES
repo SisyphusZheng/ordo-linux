@@ -5,3 +5,16 @@
 # （tests/cases/354-release-source-anchor.sh 校验）。
 luciole_commit=bae75c541ce1d863438d013f1f157b0db85e87df
 luciole_distfile=luciole-0.1.0-bae75c541ce1d863438d013f1f157b0db85e87df.tar.gz
+
+# M2 原生二进制 —— 摘要与产地（tests/cases/374-binary-provenance.sh 校验）。
+#
+# 公开源码只含重建脚本；以下二进制由脚本在 7.0.9-asahi-2 源码树产出，
+# 0.1.0 独立 USB 安装器从发行载荷读取。modules.tar.gz 提供 appledrm、
+# 配套依赖与 kmod 索引；macsmc-power.ko 是 BCF0 长度修复后的电池模块。
+# 任一字节变化都会让 374 变红，重建后须同时更新路径与摘要。
+m2_display_modules=dev/m2/display/modules.tar.gz
+m2_display_modules_sha256=3b4ed0a4d73b92680170fd81a24d5652dce1eb4063370213c8106aa672bd94ca
+m2_display_rebuild=dev/m2/display/rebuild.sh
+m2_power_module=dev/m2/power/macsmc-power.ko
+m2_power_module_sha256=4cf9425322be3e350e76c38ed0107026fe642a0776a5ec9ea08989628af51e96
+m2_power_rebuild=dev/m2/power/rebuild.sh

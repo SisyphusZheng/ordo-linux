@@ -2,18 +2,28 @@ Ordo Linux — 许可
 
 本仓库不采用单一许可证。按内容类型划分：
 
-  代码（install.sh、scripts/、tests/、Makefile、.github/）
+  代码与构建工具（install.sh、scripts/、tests/、Makefile、.github/、dev/、overlay/）
        GNU General Public License v2.0 or later (GPL-2.0-or-later)
+       overlay/app-crypt/libsecret 的补丁随上游 LGPL-2.1 分发
 
   系统定义（config/）
        GNU General Public License v2.0 or later (GPL-2.0-or-later)
+       config/desktop/wallpapers/ 下的 PNG 按品牌素材授权；
+       config/release/ 中随附的上游签名/摘要材料随原始来源分发，
+       本仓编写的锚点（SOURCES）仍为 GPL-2.0-or-later
        第三方 M2 软件包默认配置沿用其原始许可，见 config/platform/m2/package-defaults/README.md
 
-  文档（docs/）
+  文档（docs/ 与仓库根目录的 *.md）
+       README.md、AGENTS.md、CONTRIBUTING.md、CHANGELOG.md、SECURITY.md、LICENSE-NOTES.md
        Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
 
-  品牌素材（assets/branding/）
+  品牌素材与壁纸（assets/branding/、config/desktop/wallpapers/ 下的 PNG）
        Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+
+  许可全文（licenses/）
+       各许可原文，随原许可
+
+逐路径划分表见 LICENSE-NOTES.md，本节与该表逐项一致。
 
 完整文本随仓分发（GPL 要求）：
   licenses/GPL-2.0.txt

@@ -10,11 +10,16 @@ marker=${ORDO_FIRST_APPS_MARKER:-/var/lib/ordo/first-apps.done}
 apps=${ORDO_APPS_DIR:-/opt/ordo/config/apps.d}
 flathub=${ORDO_FLATHUB:-https://flathub.org/repo/flathub.flatpakrepo}
 
-[ -e "$marker" ] && exit 0
-[ -d "$apps" ] || exit 0
-command -v flatpak >/dev/null 2>&1 || exit 0
-
 warn() { printf '!! %s\n' "$*" >&2; }
+
+[ -e "$marker" ] && exit 0
+# 清单目录是镜像的一部分；缺了说明 bundle 不完整（P1-04）。静默 exit 0 会让
+# 首启看起来“成功”却什么都没装，所以这里必须告警并留给下次启动重试。
+if [ ! -d "$apps" ]; then
+    warn "应用清单目录不存在：$apps（镜像不完整，首启应用不会安装）"
+    exit 1
+fi
+command -v flatpak >/dev/null 2>&1 || exit 0
 
 # 以桌面用户身份执行：用户级 remote 与 --user 安装必须落在 /home/ordo。
 as_ordo() {

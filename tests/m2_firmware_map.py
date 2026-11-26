@@ -160,6 +160,94 @@ def verify_contract(mapping):
         assert subprocess.run(["sh", "-c", script], capture_output=True).returncode == 1
 
 
+def wireless_dmesg_contract(mapping):
+    """dmesg 判据只认无后缀的兜底固件；后缀候选与 .sig 失败是正常探测（B2）。
+
+    真机 boot dmesg：brcmfmac 把板型后缀链（-TPHN-u-4.7-X2 → … → -TPHN）逐条
+    试一遍、每条 error -2，随后无后缀的 apple,hokkaido.bin/.txt 加载成功，
+    Wi-Fi 正常工作。旧判据 `brcmfmac.*failed with error -2` 会在固件完全正常
+    的机器上恒红；只有兜底名也 -2 才说明固件真的没加载上。
+    """
+    text = (PLATFORM / "verify-hardware.sh").read_text()
+    firmware = text[text.index("firmware_ready() {"):text.index("\nwireless() {")]
+    wireless = text[text.index("wireless() {"):text.index("\nbluetooth() {")]
+    with tempfile.TemporaryDirectory(prefix="wireless-") as raw:
+        tmp = Path(raw)
+        mapfile = tmp / "wireless-firmware"
+        mapfile.write_text((PLATFORM / "wireless-firmware").read_text())
+        lib = tmp / "lib/firmware"
+        for targets in mapping.values():
+            for wanted in targets:
+                path = lib / "vendorfw" / wanted
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"fw")
+        radio = tmp / "ieee80211/phy0"
+        (radio / "device").mkdir(parents=True)
+        (radio / "device/driver").symlink_to("/drivers/brcmfmac")
+        log = tmp / "dmesg.log"
+        bins = tmp / "bin"
+        bins.mkdir()
+        dmesg = bins / "dmesg"
+        dmesg.write_text('#!/bin/sh\ncat "$DMESG_LOG"\n')
+        dmesg.chmod(0o755)
+
+        body = firmware + wireless
+        body = body.replace("/opt/ordo/config/platform/m2/wireless-firmware", str(mapfile))
+        body = body.replace("/etc/ordo/wireless-firmware", str(mapfile))
+        body = body.replace('"/lib/firmware/', f'"{lib}/')
+        body = body.replace("/sys/class/ieee80211", str(tmp / "ieee80211"))
+        script = f"set -u\n{body}\nwireless"
+
+        def run(lines, dmesg_log=None):
+            log.write_text("".join(f"{line}\n" for line in lines))
+            return subprocess.run(
+                ["sh", "-c", script], capture_output=True, text=True,
+                env={"PATH": f"{bins}:{os.environ['PATH']}",
+                     "DMESG_LOG": str(dmesg_log or log)})
+
+        sig = ("brcmfmac 0000:01:00.0: Direct firmware load for "
+               "brcm/brcmfmac4387c2-pcie.sig failed with error -2")
+        loaded = "brcmfmac 0000:01:00.0: brcmf_fw_alloc_request: using brcm/brcmfmac4387c2-pcie for chip BCM4387/2"
+        # 真机 dmesg：板型后缀链每条都 -2，随后无后缀兜底名加载成功。
+        suffix_failures = [
+            "brcmfmac 0000:01:00.0: Direct firmware load for "
+            f"brcm/brcmfmac4387c2-pcie.apple,hokkaido-{suffix}.{extension} failed with error -2"
+            for suffix in ("TPHN-u-4.7-X2", "TPHN-u-4.7", "TPHN-u", "TPHN", "X2")
+            for extension in ("bin", "txt", "clm_blob")
+        ]
+        fallback_ok = [
+            "brcmfmac 0000:01:00.0: Direct firmware load for "
+            f"brcm/brcmfmac4387c2-pcie.apple,hokkaido.{extension} succeeded"
+            for extension in ("bin", "txt", "clm_blob")
+        ]
+        # ① 只有后缀候选失败、兜底名成功：固件链是完整的 —— 必须通过
+        result = run([loaded, sig, *suffix_failures, *fallback_ok])
+        assert result.returncode == 0, result.stderr
+
+        # ② 连兜底 .bin 也 -2：真的坏
+        bin_failure = ("brcmfmac 0000:01:00.0: Direct firmware load for "
+                       "brcm/brcmfmac4387c2-pcie.apple,hokkaido.bin failed with error -2")
+        result = run([loaded, *suffix_failures, *fallback_ok, bin_failure])
+        assert result.returncode == 1, result
+        assert "apple,hokkaido" in result.stderr
+
+        # 兜底 .txt 失败同样是坏（板型校准缺失，按验收口径算失败）
+        txt_failure = ("brcmfmac 0000:01:00.0: Direct firmware load for "
+                       "brcm/brcmfmac4387c2-pcie.apple,hokkaido.txt failed with error -2")
+        result = run([loaded, *suffix_failures, txt_failure])
+        assert result.returncode == 1, result
+
+        # 读不到内核日志：无法判定（2），不得算通过
+        result = run([], dmesg_log=tmp / "no-such-dmesg")
+        assert result.returncode == 2, result
+
+        # 没有 brcmfmac 注册的网卡：红
+        (radio / "device/driver").unlink()
+        result = run([loaded])
+        assert result.returncode == 1, result
+        (radio / "device/driver").symlink_to("/drivers/brcmfmac")
+
+
 def consumers_share_one_table():
     mapping = build.firmware_map()
     assert len(mapping) > 0
@@ -179,5 +267,6 @@ archive_contract()
 wireless_firmware_contract(mapping)
 boot_sync_contract(mapping)
 verify_contract(mapping)
+wireless_dmesg_contract(mapping)
 consumers_share_one_table()
 print("P1-03 firmware mapping: ok")

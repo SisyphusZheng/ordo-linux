@@ -56,8 +56,12 @@ PYTHON
 assert_rc "$?" 0 "固定归档名与清单一致，ebuild 哈希正确"
 assert_not_contains "$(cat "$ROOT/overlay/.gitignore")" "gui-apps/*/Manifest" \
     "没有忽略 gui-apps 的 Manifest 规则"
-assert_rc "$(cd "$ROOT" && git check-ignore -q overlay/gui-apps/luciole/Manifest; echo $?)" 1 \
+assert_rc "$(cd "$ROOT" && git check-ignore -q --no-index overlay/gui-apps/luciole/Manifest; echo $?)" 1 \
     "Luciole Manifest 不被忽略"
+# 已跟踪文件在普通模式下恒返回「未忽略」；必须用 --no-index + 尚未存在的新包
+# 路径，才能探到会吞掉未来 Manifest 的规则。
+assert_rc "$(cd "$ROOT" && git check-ignore -q --no-index overlay/gui-apps/newpkg/Manifest; echo $?)" 1 \
+    "假想新包的 Manifest 不被忽略（--no-index 探测）"
 
 case_name "已下线的 overlay 包不再存在"
 

@@ -1,6 +1,10 @@
 
 [general]
-runfile = "/var/lib/ordo/greetd-first-session"
+# runfile 记录「首启自动登录已执行」。它必须放在**不随系统 BE 回滚**的数据集上：
+# /var/lib 属于根数据集，回滚根 BE 会把该状态一并回滚，下次开机又自动登录一次，
+# 且重装时 first-desktop.sh 的「marker 必须不存在」断言会直接 die。
+# /home 是独立数据集（config/dataset 的 HOME_DATASET），系统回滚不动它。
+runfile = "/home/.ordo/greetd-first-session"
 
 [initial_session]
 user = "ordo"

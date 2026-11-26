@@ -1,0 +1,95 @@
+#!/bin/sh
+# ordo-wifi — 以 root 建系统级 Wi-Fi 配置（密码进 NetworkManager keyfile）
+#
+# 【为什么需要】Ordo 默认没有全局 Secret Service（偏离登记见
+# config/desktop/README.md「密钥服务契约」）。Noctalia 网络面板新建设连接时
+# 会落成 agent-owned（PSK 交给 keyring）：本机没有 keyring，密码从未落到
+# /etc/NetworkManager/system-connections，掉线后取不回密码 —— 表现为
+# 输对密码后连上约 1 秒又断开、循环重试。
+#
+# 本 helper 一律建**系统级**配置：wifi-sec.psk-flags 0（PSK 存系统 keyfile）
+# 且 connection.permissions 为空（所有用户可自动连接），不依赖任何 keyring。
+#
+# 用法:
+#   doas ordo-wifi "<SSID>"                         # 交互输入密码
+#   ORDO_WIFI_PSK="..." doas ordo-wifi "<SSID>"     # 非交互
+#
+# 退出码: 0 成功 | 1 失败/参数错误 | 2 无法判定（缺 nmcli）
+set -eu
+
+usage() {
+    cat <<'EOF'
+用法: ordo-wifi <SSID>
+
+以 root 创建系统级 Wi-Fi 配置（psk-flags=0，permissions 为空），
+密码保存到 NetworkManager 的系统 keyfile，不依赖 Secret Service。
+密码交互输入；非交互场景用环境变量 ORDO_WIFI_PSK。
+退出码: 0 成功 | 1 失败 | 2 无法判定
+EOF
+}
+
+case "${1:-}" in
+    -h|--help) usage; exit 0 ;;
+esac
+if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
+    usage >&2
+    exit 1
+fi
+ssid=$1
+
+if [ "$(id -u)" != 0 ]; then
+    printf '需要 root：doas ordo-wifi "%s"\n' "$ssid" >&2
+    exit 1
+fi
+if ! command -v nmcli >/dev/null 2>&1; then
+    printf '找不到 nmcli（NetworkManager 未安装？）—— 无法判定\n' >&2
+    exit 2
+fi
+
+psk=${ORDO_WIFI_PSK:-}
+if [ -z "$psk" ]; then
+    printf 'Wi-Fi 密码（%s）：' "$ssid" >&2
+    _echo_off=0
+    if [ -t 0 ] && stty -echo 2>/dev/null; then _echo_off=1; fi
+    IFS= read -r psk || psk=
+    if [ "$_echo_off" -eq 1 ]; then stty echo 2>/dev/null || :; fi
+    printf '\n' >&2
+fi
+if [ -z "$psk" ]; then
+    printf '密码为空，未创建配置\n' >&2
+    exit 1
+fi
+
+# 先按名字找已有 profile：重跑时只改属性，不重复 add（add 会报已存在）。
+_created=0
+if nmcli -g NAME connection show 2>/dev/null | grep -Fxq -- "$ssid"; then
+    nmcli connection modify "$ssid" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk-flags 0 \
+        connection.permissions "" \
+        connection.autoconnect yes \
+        || { printf '修改系统级 Wi-Fi 配置失败：%s\n' "$ssid" >&2; exit 1; }
+else
+    nmcli connection add type wifi con-name "$ssid" ssid "$ssid" \
+        wifi-sec.key-mgmt wpa-psk \
+        wifi-sec.psk-flags 0 \
+        connection.permissions "" \
+        connection.autoconnect yes \
+        || { printf '创建系统级 Wi-Fi 配置失败：%s\n' "$ssid" >&2; exit 1; }
+    _created=1
+fi
+
+# 密码单独写入：psk-flags=0 时 nmcli 直接落系统 keyfile，不询问 agent。
+if ! nmcli connection modify "$ssid" wifi-sec.psk "$psk"; then
+    printf '写入 Wi-Fi 密码失败：%s\n' "$ssid" >&2
+    [ "$_created" -eq 0 ] || nmcli connection delete "$ssid" >/dev/null 2>&1 || :
+    exit 1
+fi
+
+if ! nmcli connection up "$ssid"; then
+    printf '连接失败（密码错误或信号不足）：%s\n' "$ssid" >&2
+    # 本次新建的坏配置直接删掉，避免 autoconnect 用错密码无限重试。
+    [ "$_created" -eq 0 ] || nmcli connection delete "$ssid" >/dev/null 2>&1 || :
+    exit 1
+fi
+printf '已创建系统级 Wi-Fi 配置并连接：%s\n' "$ssid"
